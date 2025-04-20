@@ -3,8 +3,6 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 import torch
-from torch import Tensor
-from jaxtyping import Float, Int
 
 
 def get_batch(
