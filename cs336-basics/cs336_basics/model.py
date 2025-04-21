@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import json
 import logging
 import math
@@ -29,17 +28,16 @@ class Linear(nn.Module):
             d_out: int
                 The number of output features.
         """
-        
+
         super().__init__()
         std = math.sqrt(2 / (d_in + d_out))
         self.weight: Float[Tensor, " d_out d_in"] = nn.Parameter(
-            nn.init.trunc_normal_(torch.empty(d_out, d_in), std=std, a=-3*std, b=3*std),
-            requires_grad=True
+            nn.init.trunc_normal_(torch.empty(d_out, d_in), std=std, a=-3 * std, b=3 * std), requires_grad=True
         )
 
     def forward(self, x: Float[Tensor, " ... d_in"]) -> Float[Tensor, " ... d_out"]:
         return einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
-    
+
     def extra_repr(self):
         return f"d_out={self.weight.shape[0]}, d_in={self.weight.shape[1]}"
 
@@ -49,13 +47,12 @@ class Embedding(nn.Module):
         super().__init__()
         std = 1.0
         self.weight = nn.Parameter(
-            nn.init.trunc_normal_(torch.empty(vocab_size, d_model), std=std, a=-3 * std, b=3 * std),
-            requires_grad=True
+            nn.init.trunc_normal_(torch.empty(vocab_size, d_model), std=std, a=-3 * std, b=3 * std), requires_grad=True
         )
-    
+
     def forward(self, token_ids: Int[Tensor, " ..."]) -> Float[Tensor, " ... d_model"]:
         return self.weight[token_ids, :]
-    
+
     def extra_repr(self):
         return f"vocab_size={self.weight.shape[0]}, d={self.weight.shape[1]}"
 
@@ -105,7 +102,7 @@ class RMSNorm(nn.Module):
         x = x * rms
 
         return (self.weight * x).to(in_dtype)
-    
+
     def extra_repr(self):
         return f"hidden_size={self.weight.shape[0]}, eps={self.eps}"
 
@@ -114,16 +111,15 @@ class RotaryEmbedding(nn.Module):
     def __init__(self, context_length: int, dim: int, theta: float = 10000.0):
         super().__init__()
         self.register_buffer(
-            "_freq_cis_cache",
-            RotaryEmbedding._init_cache(context_length, dim, theta), persistent=False
+            "_freq_cis_cache", RotaryEmbedding._init_cache(context_length, dim, theta), persistent=False
         )
-    
+
     @staticmethod
     def _init_cache(context_length: int, dim: int, theta: float) -> Float[Tensor, " 2 context_length half_dim"]:
         assert dim % 2 == 0
 
         d = torch.arange(0, dim, 2) / dim
-        freqs = theta ** -d
+        freqs = theta**-d
         t = torch.arange(context_length)
 
         freqs = einsum(t, freqs, "t, f -> t f")
@@ -132,20 +128,20 @@ class RotaryEmbedding(nn.Module):
         return torch.stack((cos, sin))
 
     def forward(self, x: Float[Tensor, " ... seq d"], pos_ids: Int[Tensor, " ... seq"]) -> Float[Tensor, " ... seq d"]:
-        x1, x2 = rearrange(x, '... (half_d xy) -> xy ... half_d', xy=2)
+        x1, x2 = rearrange(x, "... (half_d xy) -> xy ... half_d", xy=2)
 
         # Standard
         # cos, sin = self._freq_cis_cache[:, pos_ids, :]
 
         # einx
-        cos, sin = einx.get_at('cos_sin [pos] half_dim, ... -> cos_sin ... half_dim', self._freq_cis_cache, pos_ids)
+        cos, sin = einx.get_at("cos_sin [pos] half_dim, ... -> cos_sin ... half_dim", self._freq_cis_cache, pos_ids)
 
         # 2D rotation matrix applied to pairs in x
         x1_rot = cos * x1 - sin * x2
         x2_rot = sin * x1 + cos * x2
-        result = einx.rearrange('... x_half, ... x_half -> ... (x_half (1 + 1))', x1_rot, x2_rot).contiguous()
+        result = einx.rearrange("... x_half, ... x_half -> ... (x_half (1 + 1))", x1_rot, x2_rot).contiguous()
         return result
-    
+
     def extra_repr(self):
         return f"context_length={self._freq_cis_cache.shape[0]}, dim/2={self._freq_cis_cache.shape[1]}"
 
@@ -183,7 +179,7 @@ class BasicsTransformerLM(nn.Module):
         num_layers: int,
         num_heads: int,
         d_ff: int,
-        rope_theta: float,
+        rope_theta: float = 10000.0,
     ):
         # Store the model configuration for serialization / deserialization
         self.config = {
@@ -195,11 +191,7 @@ class BasicsTransformerLM(nn.Module):
         self.d_model = d_model
         self.token_embeddings = Embedding(vocab_size, d_model)
         d_head = d_model // num_heads
-        self.positional_encoder = RotaryEmbedding(
-            context_length=context_length,
-            dim=d_head,
-            theta=rope_theta
-        )
+        self.positional_encoder = RotaryEmbedding(context_length=context_length, dim=d_head, theta=rope_theta)
         self.layers = nn.ModuleList(
             [
                 TransformerBlock(
@@ -278,7 +270,7 @@ class BasicsTransformerLM(nn.Module):
         """
         if x.dim() == 1:
             x = x.unsqueeze(0)
-            
+
         original_sequence_length = x.size(-1)
         for _ in range(max_new_tokens):
             # Take the last `context_length` tokens if the input is
@@ -475,7 +467,9 @@ class CausalMultiHeadSelfAttention(nn.Module):
 
         self.positional_encoder = positional_encoder  # RoPE
 
-    def forward(self, x: Float[Tensor, " ... seq d_k"], token_positions: Int[Tensor, " ... seq"] | None = None) -> Float[Tensor, " ... seq d_v"]:
+    def forward(
+        self, x: Float[Tensor, " ... seq d_k"], token_positions: Int[Tensor, " ... seq"] | None = None
+    ) -> Float[Tensor, " ... seq d_v"]:
         """
         Args:
             x: The input to perform multi-headed self-attention on.
@@ -498,7 +492,9 @@ class CausalMultiHeadSelfAttention(nn.Module):
         )  # fmt: skip
 
         if token_positions is None:
-            token_positions = einx.rearrange("seq -> b... seq", torch.arange(sequence_length, device=x.device), b=[1] * len(b))
+            token_positions = einx.rearrange(
+                "seq -> b... seq", torch.arange(sequence_length, device=x.device), b=[1] * len(b)
+            )
 
         # Duplicate token positions for each head
         token_positions = rearrange(token_positions, "... seq -> ... 1 seq")
@@ -508,8 +504,8 @@ class CausalMultiHeadSelfAttention(nn.Module):
 
         # Construct causal mask
         seq = torch.arange(sequence_length, device=x.device)
-        qi = einx.rearrange('query -> b... 1 query 1', seq, b=[1] * len(b))
-        kj = einx.rearrange('key   -> b... 1 1   key', seq, b=[1] * len(b))
+        qi = einx.rearrange("query -> b... 1 query 1", seq, b=[1] * len(b))
+        kj = einx.rearrange("key   -> b... 1 1   key", seq, b=[1] * len(b))
         causal_mask = qi >= kj  # (query, key)
 
         # Shape: (..., num_heads, sequence_length, d_k)
@@ -522,6 +518,7 @@ class CausalMultiHeadSelfAttention(nn.Module):
         # Apply the output projection
         output = self.output_proj(attn_output)
         return output
+
 
 def silu(x: torch.Tensor):
     return x * torch.sigmoid(x)

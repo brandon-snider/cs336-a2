@@ -1,0 +1,9 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+
+# NVTX Usage
+
+- Use `nvtx.range` instead of `nvtx.annotate`
