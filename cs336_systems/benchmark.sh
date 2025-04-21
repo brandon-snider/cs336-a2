@@ -67,17 +67,17 @@ fi
 trap "echo 'Benchmark interrupted'; exit 1" INT
 
 # Forward only
-# if [ "$EXCLUDE_F" = false ]; then
-#     for size in "${SIZES[@]}"; do
-#         for seq_len in "${SEQ_LENS[@]}"; do
-#             uv run python -m cs336_systems.benchmark \
-#                 --size ${size} \
-#                 --seq-len ${seq_len} \
-#                 --warmup ${WARMUP} \
-#                 --no-backward || echo "Error in forward-only for size=${size}, seq_len=${seq_len}, continuing..."
-#         done
-#     done
-# fi
+if [ "$EXCLUDE_F" = false ]; then
+    for size in "${SIZES[@]}"; do
+        for seq_len in "${SEQ_LENS[@]}"; do
+            uv run python -m cs336_systems.benchmark \
+                --size ${size} \
+                --seq-len ${seq_len} \
+                --warmup ${WARMUP} \
+                --no-backward || echo "Error in forward-only for size=${size}, seq_len=${seq_len}, continuing..."
+        done
+    done
+fi
 
 # Forward-backward
 if [ "$EXCLUDE_FB" = false ]; then

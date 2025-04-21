@@ -293,7 +293,14 @@
 
   This is the vectorized element‑wise addition kernel. It consumes 0.695 ms (or 0.5%) of the total time.
 
-+ 
++ Mat‑mul kernels dominate less once back‑prop and AdamW run: their share drops from 80-85% in a forward‑only pass to 60-65% in a full training step. The freed time is picked up mainly by element‑wise vectorized Add/Mul/Div kernels, reduction operations, and the optimizer‑update kernels, which together rise from roughly 20% of runtime to about 33-40%.
+
++ In many cases, the softmax operation takes as long as computing the attention scores and taking the inner products with the value vectors combined (the softmax:matmul ratio within the attention operation varies from \~0.75x to \~1.5x in my experiments).
+
+  This is despite a vastly lower FLOP count (on the order of a 10x difference) for the softmax operation, compared to the matmuls.
+
+  This suggests that the softmax operation consumes significantly more wall time per FLOP, yielding poor utilization due to its memory-bound, control-flow-heavy nature.
+
 
 
 
