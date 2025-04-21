@@ -192,3 +192,20 @@
 
   Even with a single warmup step, the variance is noticeably higher than with five warmup steps. This suggests that one iteration may not be sufficient to complete all initialization processes, such as loading all necessary CUDA kernels or stabilizing memory allocation patterns. Subsequent steps might still encounter some initial overheads until a true steady state is reached, which appears to take a few iterations.
   
+== Problem  (`nsys_profile`): 5 points
+
++ Mean total forward pass time; all sizes, all sequence lengths:
+
+  #figure(tablem[
+  | *Model* | *128*      | *256*      | *512*       | *1024*     |
+  |---------|------------|------------|-------------|------------|
+  | small   | 19.805 ms  | 20.595 ms  | 19.575 ms   | 44.577 ms  |
+  | medium  | 39.319 ms  | 38.625 ms  | 56.818 ms   | 126.23 ms  |
+  | large   | 58.511 ms  | 58.284 ms  | 127.522 ms  | OOM        |
+  | xlarge  | 79.637 ms  | 127.036 ms | 251.931 ms  | OOM        |
+  | 2.7b    | 87.422 ms  | 173.87 ms  | 339.198 ms  | OOM        |
+  ],
+  caption: "Forward Pass Total Time (ms) by Model Size and Sequence Length"
+  )
+
+  The `nsys` timings are quite significantly different from the timing using `timeit`, particularly for larger models and longer sequence lengths. In general, the `nsys` timings are significantly larger, sometimes by as much as 4-5x.

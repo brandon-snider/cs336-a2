@@ -4,12 +4,12 @@
 
 Usage:
 - Forward only (inference mode):
-    python -m cs336_systems.benchmark --size small --no-backward
+    python -m cs336_systems.benchmark --size sm --no-backward
 - Forward + backward (training mode):
-    python -m cs336_systems.benchmark --size small
+    python -m cs336_systems.benchmark --size sm
 
 Flags:
-  --size: small, medium, large, xl, 2.7b
+  --size: sm, md, lg, xl, 2.7b
   --d_model: int
   --d_ff: int
   --d_layers: int
@@ -30,9 +30,9 @@ import torch
 from cs336_basics.model import BasicsTransformerLM as Transformer
 
 _PRESETS: dict[str, dict[str, int]] = {
-    "small": {"d_model": 768, "d_ff": 3072, "d_layers": 12, "num_heads": 12},
-    "medium": {"d_model": 1024, "d_ff": 4096, "d_layers": 24, "num_heads": 16},
-    "large": {"d_model": 1280, "d_ff": 5120, "d_layers": 36, "num_heads": 20},
+    "sm": {"d_model": 768, "d_ff": 3072, "d_layers": 12, "num_heads": 12},
+    "md": {"d_model": 1024, "d_ff": 4096, "d_layers": 24, "num_heads": 16},
+    "lg": {"d_model": 1280, "d_ff": 5120, "d_layers": 36, "num_heads": 20},
     "xl": {"d_model": 1600, "d_ff": 6400, "d_layers": 48, "num_heads": 25},
     "2.7b": {"d_model": 2560, "d_ff": 10240, "d_layers": 32, "num_heads": 32},
 }

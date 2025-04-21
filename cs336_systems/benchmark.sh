@@ -15,7 +15,7 @@
 #   --warmup N: Number of warmup iterations (default: 5)
 
 # Define model sizes and sequence lengths
-SIZES=("small" "medium" "large" "xl" "2.7b")
+SIZES=("sm" "md" "lg" "xl" "2.7b")
 SEQ_LENS=(128 256 512 1024)
 
 # Parse command line arguments
