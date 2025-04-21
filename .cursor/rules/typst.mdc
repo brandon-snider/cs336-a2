@@ -1,0 +1,71 @@
+---
+description: 
+globs: **/*.typ,*.typ
+alwaysApply: false
+---
+# Typst (.typ) Conventions
+
+## Overview
+- Typst is a markup-based typesetting system, similar to LaTeX but with different syntax and conventions.
+- It uses dedicated syntax for common tasks (like Markdown) and a more consistent command structure than LaTeX.
+- Compilation is typically very fast.
+
+## Syntax Basics
+- **Commands/Functions:** Start with `#` (e.g., `#import`, `#set`, `#figure`, `#let`).
+  - Call structure: `#name(positional_args, named_arg: value) [optional content block]`.
+  - Positional arguments come before named arguments.
+  - Content blocks (`[...]`) are often used for the main content a function operates on.
+- **Content Blocks:** Use square brackets `[...]` for multi-part content arguments or the main content body for functions like `#figure`.
+- **Headings:** Use `=` for Level 1, `==` for Level 2, etc.
+- **Lists:** Use `+` for unordered lists, `-` for numbered lists (default), or configure with `#set enum(...)` / `#set list(...)`.
+- **Emphasis/Strong:** Use `_emphasis_` for italics and `*strong*` for bold.
+- **Symbols:** See dedicated section below.
+- **Code Blocks:** Use backticks `` ``` `` for raw blocks. Use `` `code` `` for inline code.
+- **Escaping:** Use a backslash `\\` before characters that have special meaning if you want their literal form (e.g., `\\#`, `\\*`, `\\_`, `\\$`, `\\`, `\``).
+
+## Math Mode
+- **Entering Math:** Use `$...$` for math content. Inline math uses `$x^2$` within text. Block math uses ` $ x = sum_(i=1)^n x_i $ ` on its own line for display equations.
+- **Common Syntax:**
+  - Subscripts: `x_1` -> \(x_1\)
+  - Superscripts: `a^2` -> \(a^2\)
+  - Fractions: `(a+b)/c` or `frac(a+b, c)` -> \((a+b)/c\)
+  - Symbols: Access directly by name (see Symbols section).
+  - Functions: `sqrt(x)`, `log(x)`, `sin(x)`, `abs(x)`.
+  - Matrices/Vectors: `mat(...)`, `vec(...)`.
+  - Limits, Sums, Integrals: `lim_(x -> 0)`, `sum_(i=1)^n`, `integral_a^b`. Parentheses group terms for limits: `sum_(i=1)^n (x_i)`.
+
+## Symbols
+- **Access:** Symbols are accessed by their names within math mode (`$ ... $`) or using the `sym` module (`#sym.name`) for text symbols.
+- **Math Symbols:**
+  - Greek letters: `alpha`, `beta`, `gamma`, `pi`, `Omega`, etc.
+  - Operators: `+`, `-`, `*`, `/`, `plus.minus` (\(±\)), `times` (\(×\)), `divide` (\(÷\)), `dots.h` (\(⋯\)), `dots.v` (\(⋮\)), `dots.d` (\(⋱\)).
+  - Relations: `=`, `!=`, `<`, `>`, `<=`, `>=`, `approx`, `prop`, `in`.
+  - Arrows: `arrow.r` (\(→\)), `arrow.l` (\(←\)), `arrow.lr` (\(↔\)), `arrow.implies` (\(⇒\)).
+  - Sets: `NN` (\(ℕ\)), `ZZ` (\(ℤ\)), `QQ` (\(ℚ\)), `RR` (\(ℝ\)), `CC` (\(ℂ\)), `emptyset` (\(∅\)).
+  - Accents: `hat(x)`, `tilde(x)`, `dot(x)`, `abs(x)`, `norm(x)`, `floor(x)`, `ceil(x)`.
+- **Text Symbols:** Use `#sym.name`, e.g., `#sym.copyright`, `#sym.bullet`, `#sym.euro`, `#sym.pencil`.
+- **Emoji:** Use `#emoji.name`, e.g., `#emoji.rocket`.
+
+## Key Differences from LaTeX
+- **Syntax:** Avoid LaTeX commands (e.g., `\documentclass`, `\section`, `\textbf`). Use Typst's native syntax (`#set document(...)`, `=`, `*strong*`).
+- **Packages:** Use `#import` to include packages.
+- **Commands:** Functions are called like `#name(arg: val)`. No backslashes.
+
+## User Preferences (from writeup.typ)
+- **Tables:** Prefer using the `tablem` package with Markdown-like syntax inside a `#figure` block.
+  ```typst
+  #import "@preview/tablem:0.2.0": * // Ensure import if needed
+
+  #figure(
+    tablem[
+      | *Header 1* | *Header 2* |
+      |------------|------------|
+      | Cell 1     | Cell 2     |
+      | Cell 3     | Cell 4     |
+    ],
+    caption: "Table caption."
+  )
+  ```
+- **Custom Definitions:** Use `#let` to define variables or custom functions/styles.
+- **Global Settings:** Use `#set` for document-wide settings (e.g., `text`, `heading`).
+- **Show Rules:** Use `#show` to apply rules to elements (e.g., `#show link: underline`). 

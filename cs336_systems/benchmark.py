@@ -1,138 +1,155 @@
+#!/usr/bin/env python
+"""
+Usage:
+- Forward only (inference mode):
+    python -m cs336_systems.benchmark --size small --no-backward
+- Forward + backward (training mode):
+    python -m cs336_systems.benchmark --size small
+
+Flags:
+  --size: small, medium, large, xl, 2.7b
+  --d_model: int
+  --d_ff: int
+  --d_layers: int
+  --num_heads: int
+  --batch_size: int
+  --seq_len: int
+  --vocab_size: int
+  --dtype: fp32, bf16
+  --warmup: int
+  --steps: int
+"""
+
 import argparse
+import sys
 import timeit
 import torch
 
 from cs336_basics.model import BasicsTransformerLM as Transformer
 
-from common import MODEL_SIZES, VOCAB_SIZE, ROPE_THETA, BATCH_SIZE
+_PRESETS: dict[str, dict[str, int]] = {
+    "small": {"d_model": 768, "d_ff": 3072, "d_layers": 12, "num_heads": 12},
+    "medium": {"d_model": 1024, "d_ff": 4096, "d_layers": 24, "num_heads": 16},
+    "large": {"d_model": 1280, "d_ff": 5120, "d_layers": 36, "num_heads": 20},
+    "xl": {"d_model": 1600, "d_ff": 6400, "d_layers": 48, "num_heads": 25},
+    "2.7b": {"d_model": 2560, "d_ff": 10240, "d_layers": 32, "num_heads": 32},
+}
 
 
-def benchmark(
-    model: Transformer,
-    batch_size: int = BATCH_SIZE,
-    seq_len: int = 512,
-    warmup_steps: int = 5,
-    timed_steps: int = 10,
-    include_backward: bool = False,
-) -> dict:
-    if not include_backward:
-        model.eval()
-    else:
-        model.train()
+def _parse_args() -> argparse.Namespace:
+    """Build an ``argparse`` interface and return parsed arguments."""
+    p = argparse.ArgumentParser()
 
-    inputs = torch.randint(0, VOCAB_SIZE, (batch_size, seq_len), device="cuda")
+    size_grp = p.add_mutually_exclusive_group(required=True)
+    size_grp.add_argument("--size", choices=_PRESETS.keys())
+    size_grp.add_argument("--d_model", type=int)
 
-    forward_times = []
-    backward_times = []
-    total_times = []
+    p.add_argument("--d_ff", type=int)
+    p.add_argument("--num-layers", dest="d_layers", type=int)
+    p.add_argument("--num-heads", dest="num_heads", type=int)
 
+    p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--seq-len", type=int, default=128)
+    p.add_argument("--vocab-size", type=int, default=10_000)
+
+    p.add_argument("--dtype", choices=["fp32", "bf16"], default="fp32")
+
+    p.add_argument("--warmup", type=int, default=5)
+    p.add_argument("--steps", type=int, default=10)
+
+    bw_grp = p.add_mutually_exclusive_group()
+    bw_grp.add_argument("--no-backward", dest="do_backward", action="store_false")
+    bw_grp.add_argument("--forward-backward", dest="do_backward", action="store_true")
+    p.set_defaults(do_backward=True)
+
+    return p.parse_args()
+
+
+def _build_model(cfg: dict[str, int], args: argparse.Namespace) -> Transformer:
+    return Transformer(
+        vocab_size=args.vocab_size,
+        context_length=args.seq_len,
+        d_model=cfg["d_model"],
+        num_layers=cfg["d_layers"],
+        num_heads=cfg["num_heads"],
+        d_ff=cfg["d_ff"],
+        rope_theta=10000.0,
+    )
+
+
+def _time_step(model: Transformer, batch: torch.Tensor, do_backward: bool) -> tuple[float, float]:
+    """Run one iteration and return a *(forward_time, backward_time)* tuple."""
     torch.cuda.synchronize()
 
-    for i in range(warmup_steps + timed_steps):
+    t0 = timeit.default_timer()
+    if do_backward:
+        logits = model(batch)
+    else:
+        with torch.inference_mode():
+            logits = model(batch)
+    torch.cuda.synchronize()
+    fw_sec = timeit.default_timer() - t0
+
+    bw_sec = 0.0
+    if do_backward:
+        t1 = timeit.default_timer()
+        logits.mean().backward()
         torch.cuda.synchronize()
-        start_time = timeit.default_timer()
+        bw_sec = timeit.default_timer() - t1
 
-        # Forward pass
-        logits = model(inputs)
-
-        torch.cuda.synchronize()
-        forward_end_time = timeit.default_timer()
-
-        # Backward pass
-        if include_backward:
-            logits.mean().backward()
-            torch.cuda.synchronize()
-        backward_end_time = timeit.default_timer()
-
-        if i >= warmup_steps:
-            forward_duration = forward_end_time - start_time
-            backward_duration = backward_end_time - forward_end_time if include_backward else 0
-            total_duration = backward_end_time - start_time
-
-            forward_times.append(forward_duration)
-            if include_backward:
-                backward_times.append(backward_duration)
-            total_times.append(total_duration)
-
-    forward_times_t = torch.tensor(forward_times)
-    backward_times_t = torch.tensor(backward_times) if include_backward else torch.tensor([])
-    total_times_t = torch.tensor(total_times)
-
-    results = {
-        "forward_times": forward_times,
-        "forward_mean": forward_times_t.mean().item(),
-        "forward_std": forward_times_t.std().item(),
-        "total_times": total_times,
-        "total_mean": total_times_t.mean().item(),
-        "total_std": total_times_t.std().item(),
-    }
-    if include_backward:
-        results.update(
-            {
-                "backward_times": backward_times,
-                "backward_mean": backward_times_t.mean().item(),
-                "backward_std": backward_times_t.std().item(),
-            }
-        )
-
-    return results
+    return fw_sec, bw_sec
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Benchmark a transformer model")
-    parser.add_argument("--sizes", type=str, default="small")
-    parser.add_argument("--d_model", type=int)
-    parser.add_argument("--d_ff", type=int)
-    parser.add_argument("--num_layers", type=int)
-    parser.add_argument("--num_heads", type=int)
-    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
-    parser.add_argument("--seq_len", type=int, default=512)
-    parser.add_argument("--warmup_steps", type=int, default=5)
-    parser.add_argument("--timed_steps", type=int, default=10)
-    parser.add_argument("--include_backward", action="store_true")
-    args = parser.parse_args()
+def main() -> None:
+    if not torch.cuda.is_available():
+        print("Error: CUDA is not available. This benchmark requires a CUDA-capable GPU.")
+        sys.exit(1)
 
-    sizes = args.sizes.split(",")
+    args = _parse_args()
 
-    if sizes == ["all"]:
-        sizes = MODEL_SIZES.keys()
+    if args.size:
+        cfg = _PRESETS[args.size]
+    else:
+        required = ("d_model", "d_ff", "d_layers", "num_heads")
+        if any(getattr(args, k) is None for k in required):
+            raise ValueError("Must supply all custom h‑params when --size is omitted")
+        cfg = dict(d_model=args.d_model, d_ff=args.d_ff, d_layers=args.d_layers, num_heads=args.num_heads)
 
-    for size in sizes:
-        # Get defaults from size, then override with any explicitly provided args
-        model_config = MODEL_SIZES.get(size, {})
-        d_model = args.d_model if args.d_model is not None else model_config["d_model"]
-        d_ff = args.d_ff if args.d_ff is not None else model_config["d_ff"]
-        num_layers = args.num_layers if args.num_layers is not None else model_config["num_layers"]
-        num_heads = args.num_heads if args.num_heads is not None else model_config["num_heads"]
+    dtype = torch.float32 if args.dtype == "fp32" else torch.bfloat16
 
-        model = Transformer(
-            vocab_size=VOCAB_SIZE,
-            context_length=args.seq_len,
-            d_model=d_model,
-            num_layers=num_layers,
-            num_heads=num_heads,
-            d_ff=d_ff,
-            rope_theta=ROPE_THETA,
-        )
-        model.to(device="cuda")
+    torch.set_float32_matmul_precision("high")
 
-        results = benchmark(
-            model,
-            args.batch_size,
-            args.seq_len,
-            args.warmup_steps,
-            args.timed_steps,
-            args.include_backward,
-        )
+    model = _build_model(cfg, args).to(device="cuda", dtype=dtype)
+    model.train(args.do_backward)
 
-        print(
-            f"Benchmarking results for {size} model ({d_model=}, {num_layers=}, {num_heads=}, {d_ff=}) on cuda:",
-        )
-        print(f"Batch size: {args.batch_size}, Sequence length: {args.seq_len}")
-        print(f"Forward pass:  mean={results['forward_mean']:.4f}s, std={results['forward_std']:.4f}s")
-        if args.include_backward:
-            print(f"Backward pass: mean={results['backward_mean']:.4f}s, std={results['backward_std']:.4f}s")
-        print(f"Total time:    mean={results['total_mean']:.4f}s, std={results['total_std']:.4f}s")
+    batch = torch.randint(0, args.vocab_size, (args.batch_size, args.seq_len), device="cuda")
+
+    for _ in range(args.warmup):
+        _time_step(model, batch, args.do_backward)
+        if args.do_backward:
+            model.zero_grad(set_to_none=True)
+
+    fw_samples, bw_samples = [], []
+    for _ in range(args.steps):
+        dt_fw, dt_bw = _time_step(model, batch, args.do_backward)
+        fw_samples.append(dt_fw)
+        bw_samples.append(dt_bw)
+        if args.do_backward:
+            model.zero_grad(set_to_none=True)
+
+    fw_t = torch.tensor(fw_samples, device="cuda")
+
+    mode = "forward-only" if not args.do_backward else "forward + backward"
+    print(
+        f"Timings for {args.size} model, batch size {args.batch_size}, seq len {args.seq_len}, {mode} over {args.steps} steps:"
+    )
+    print(f"Forward:  {fw_t.mean() * 1e3:.3f} ± {fw_t.std() * 1e3:.3f} ms")
+
+    if args.do_backward:
+        bw_t = torch.tensor(bw_samples, device="cuda")
+        total = fw_t + bw_t
+        print(f"Backward: {bw_t.mean() * 1e3:.3f} ± {bw_t.std() * 1e3:.3f} ms")
+        print(f"Total:    {total.mean() * 1e3:.3f} ± {total.std() * 1e3:.3f} ms")
 
 
 if __name__ == "__main__":
