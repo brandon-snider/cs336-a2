@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 """
+`timeit`-based benchmarking.
+
 Usage:
 - Forward only (inference mode):
     python -m cs336_systems.benchmark --size small --no-backward
@@ -116,7 +118,6 @@ def main() -> None:
         cfg = dict(d_model=args.d_model, d_ff=args.d_ff, d_layers=args.d_layers, num_heads=args.num_heads)
 
     dtype = torch.float32 if args.dtype == "fp32" else torch.bfloat16
-
     torch.set_float32_matmul_precision("high")
 
     model = _build_model(cfg, args).to(device="cuda", dtype=dtype)
@@ -139,9 +140,9 @@ def main() -> None:
 
     fw_t = torch.tensor(fw_samples, device="cuda")
 
-    mode = "forward-only" if not args.do_backward else "forward + backward"
+    mode_str = "forward-only" if not args.do_backward else "forward + backward"
     print(
-        f"Timings for {args.size} model, batch size {args.batch_size}, seq len {args.seq_len}, {mode} over {args.steps} steps:"
+        f"Timings for {args.size} model, batch size {args.batch_size}, seq len {args.seq_len}, {mode_str} over {args.steps} steps:"
     )
     print(f"Forward:  {fw_t.mean() * 1e3:.3f} ± {fw_t.std() * 1e3:.3f} ms")
 
