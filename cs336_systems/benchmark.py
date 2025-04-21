@@ -3,9 +3,8 @@ import timeit
 import torch
 
 from cs336_basics.model import BasicsTransformerLM as Transformer
-from cs336_basics.nn_utils import cross_entropy
 
-from common import MODEL_SIZES, VOCAB_SIZE, ROPE_THETA, DEFAULT_DEVICE, BATCH_SIZE
+from common import MODEL_SIZES, VOCAB_SIZE, ROPE_THETA, BATCH_SIZE
 
 
 def benchmark(
@@ -14,15 +13,14 @@ def benchmark(
     seq_len: int = 512,
     warmup_steps: int = 5,
     timed_steps: int = 10,
-    include_backward: bool = True,
-    device: str = DEFAULT_DEVICE,
+    include_backward: bool = False,
 ) -> dict:
     if not include_backward:
         model.eval()
     else:
         model.train()
 
-    inputs = torch.randint(0, VOCAB_SIZE, (batch_size, seq_len), device=device)
+    inputs = torch.randint(0, VOCAB_SIZE, (batch_size, seq_len), device="cuda")
 
     forward_times = []
     backward_times = []
@@ -82,17 +80,16 @@ def benchmark(
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark a transformer model")
-    parser.add_argument("--sizes", type=str, help="Model size", default="small")
-    parser.add_argument("--d_model", type=int, help="Model dimension")
-    parser.add_argument("--d_ff", type=int, help="Feed-forward dimension")
-    parser.add_argument("--num_layers", type=int, help="Number of layers")
-    parser.add_argument("--num_heads", type=int, help="Number of heads")
-    parser.add_argument("--batch-size", type=int, help="Batch size", default=BATCH_SIZE)
-    parser.add_argument("--seq-len", type=int, help="Sequence length", default=512)
-    parser.add_argument("--warmup-steps", type=int, help="Warmup steps", default=5)
-    parser.add_argument("--timed-steps", type=int, help="Timed steps", default=10)
-    parser.add_argument("--include-backward", type=bool, help="Include backward", default=True)
-    parser.add_argument("--device", type=str, help="Device (default: cuda, mps, cpu)", default=DEFAULT_DEVICE)
+    parser.add_argument("--sizes", type=str, default="small")
+    parser.add_argument("--d_model", type=int)
+    parser.add_argument("--d_ff", type=int)
+    parser.add_argument("--num_layers", type=int)
+    parser.add_argument("--num_heads", type=int)
+    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--seq_len", type=int, default=512)
+    parser.add_argument("--warmup_steps", type=int, default=5)
+    parser.add_argument("--timed_steps", type=int, default=10)
+    parser.add_argument("--include_backward", action="store_true")
     args = parser.parse_args()
 
     sizes = args.sizes.split(",")
@@ -117,7 +114,7 @@ def main():
             d_ff=d_ff,
             rope_theta=ROPE_THETA,
         )
-        model.to(device=args.device)
+        model.to(device="cuda")
 
         results = benchmark(
             model,
@@ -126,11 +123,10 @@ def main():
             args.warmup_steps,
             args.timed_steps,
             args.include_backward,
-            device=args.device,
         )
 
         print(
-            f"Benchmarking results for {size} model ({d_model=}, {num_layers=}, {num_heads=}, {d_ff=}) on {args.device}:",
+            f"Benchmarking results for {size} model ({d_model=}, {num_layers=}, {num_heads=}, {d_ff=}) on cuda:",
         )
         print(f"Batch size: {args.batch_size}, Sequence length: {args.seq_len}")
         print(f"Forward pass:  mean={results['forward_mean']:.4f}s, std={results['forward_std']:.4f}s")

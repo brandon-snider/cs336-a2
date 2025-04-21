@@ -38,7 +38,7 @@ if [ "$EXCLUDE_F" = false ]; then
                 -o out/profiling/forward-${size}-${seq_len} \
                 python -m cs336_systems.profile \
                     --sizes ${size} \
-                    --seq-lens ${seq_len} || echo "Error in forward-only for size=${size}, seq_len=${seq_len}, continuing..."
+                    --seq_lens ${seq_len} || echo "Error in forward-only for size=${size}, seq_len=${seq_len}, continuing..."
         done
     done
 fi
@@ -51,8 +51,8 @@ if [ "$EXCLUDE_FB" = false ]; then
                 -o out/profiling/forward-backward-${size}-${seq_len} \
                 python -m cs336_systems.profile \
                     --sizes ${size} \
-                    --seq-lens ${seq_len} \
-                    --include-backward || echo "Error in forward-backward for size=${size}, seq_len=${seq_len}, continuing..."
+                    --seq_lens ${seq_len} \
+                    --include_backward || echo "Error in forward-backward for size=${size}, seq_len=${seq_len}, continuing..."
         done
     done
 fi
@@ -65,9 +65,9 @@ if [ "$EXCLUDE_FBS" = false ]; then
                 -o out/profiling/forward-backward-step-${size}-${seq_len} \
                 python -m cs336_systems.profile \
                     --sizes ${size} \
-                    --seq-lens ${seq_len} \
-                    --include-backward \
-                    --include-step || echo "Error in forward-backward-step for size=${size}, seq_len=${seq_len}, continuing..."
+                    --seq_lens ${seq_len} \
+                    --include_backward \
+                    --include_step || echo "Error in forward-backward-step for size=${size}, seq_len=${seq_len}, continuing..."
         done
     done
 fi
