@@ -23,7 +23,7 @@ import torch.cuda.nvtx as nvtx
 import cs336_basics.model as _m
 from cs336_basics.model import BasicsTransformerLM as Transformer
 from cs336_basics.optimizer import AdamW
-from cs336_basics.nn_utils import softmax
+from cs336_basics.nn_utils import softmax, cross_entropy
 
 # Preset model configurations (same as benchmark.py)
 _PRESETS: dict[str, dict[str, int]] = {
@@ -106,18 +106,27 @@ def main() -> None:
     model.train(args.mode in ("forward_backward", "train"))
 
     optimizer = AdamW(model.parameters(), lr=1e-3)
-    batch = torch.randint(0, 10_000, (args.batch_size, args.seq_len), device=device)
+    inputs = torch.randint(0, 10_000, (args.batch_size, args.seq_len), device=device)
+    targets = torch.randint(0, 10_000, (args.batch_size, args.seq_len), device=device)
 
     for _ in range(args.warmup + args.steps):
         mode_str = "warmup." if _ < args.warmup else "profiling."
 
         with nvtx.range(mode_str + "forward"):
-            logits = model(batch)
+            logits = model(inputs)
+
+        if args.mode == "train":
+            with nvtx.range(mode_str + "loss"):
+                loss = cross_entropy(logits, targets)
+        else:
+            loss = logits.mean()
+
         if args.mode in ("forward_backward", "train"):
             with nvtx.range(mode_str + "backward"):
-                logits.mean().backward()
+                loss.backward()
         else:
             model.zero_grad()
+
         if args.mode == "train":
             with nvtx.range(mode_str + "optimizer.step"):
                 optimizer.step()
