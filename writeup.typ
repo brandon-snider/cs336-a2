@@ -209,3 +209,91 @@
   )
 
   The `nsys` timings are quite significantly different from the timing using `timeit`, particularly for larger models and longer sequence lengths. In general, the `nsys` timings are significantly larger, sometimes by as much as 4-5x.
+
++ Kernel that takes the most cumulative time during the forward pass (large model, sequence length = 512):
+
+  `sm80_xmma_gemm_f32f32_f32f32_f32_tn_n_tilesize128x64x8_stage3_warpsize2x2x1_ffma_aligna4_alignc4
+  _execute_kernel__5x_cublas`
+
+  This is a general matrix-matrix multiplication kernel where the inputs, accumulator, and outputs are all `float32`.
+
+  Number of instances: 72
+
+  This is the same kernel as the one that takes the most cumulative time during the backward pass, and it is invoked the same number of times.
+
++ Non-MM kernels that take a non-trivial amount of the overall time in the forward pass (large model, sequence length = 512):
+
+  A number of such kernels and their contributions to the total time are listed below. In general, these are element‑wise and block‑level reduction kernels implementing point‑wise arithmetic (mul, div, add, exp, copy, where) and reductions (max, sum) that underlie dropout masking, normalization, gating, activation, residual adds, and other per‑element operations.
+
+  `void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<
+  at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>>
+  (at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)`
+
+  This is a general (non-vectorized) element-wise multiplication kernel. It consumes 2.809 ms (or 2.2%) of the total time.
+
+  `void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<
+  float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *,
+   (unsigned long)3>>(int, T2, T3)`
+
+  This is vectorized element-wise multiplication kernel. It consumes 1.636 ms (or 1.3%) of the total time.
+
+  `void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<
+  at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float>>>
+  (at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)`
+
+  This is a general (non-vectorized) element-wise division kernel. It consumes 1.588 ms (or 1.2%) of the total time.
+
+  `void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<
+  at::native::CUDAFunctor_add<float>> (at::TensorIteratorBase &, const T1 &)::[lambda(int) 
+  (instance 1)]>(int, T3)`
+
+  This is a general (non-vectorized) element-wise addition kernel. It consumes 1.417 ms (or 1.1%) of the total time.
+
+  `void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<
+  at::native::<unnamed>::where_kernel_impl(at::TensorIterator &)::[lambda() (instance 1)]
+  ::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(bool, float, float) 
+  (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)`
+
+  This is a general (non-vectorized) kernel specialized for the ternary `where` operation (e.g. `torch.where(condition, x, y)`). It consumes 1.277 ms (or 1.0%) of the total time.
+
+  `void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<float, float,
+   float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)2>>
+   (int, T2, T3)`
+
+  This is the vectorized element‑wise scalar multiplication kernel. It consumes 1.158 ms (or 0.9%) of the total time.
+
+  `void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast
+  <at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::
+  operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) 
+  (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)`
+
+  This is the non‑vectorized element‑wise copy kernel. It consumes 1.145 ms (or 0.9%) of the total time.
+
+  `void at::native::vectorized_elementwise_kernel<(int)4, at::native::exp_kernel_cuda
+  (at::TensorIteratorBase &)::[lambda() (instance 2)]::operator ()() const::[lambda() 
+  (instance 2)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 
+  (unsigned long)2>>(int, T2, T3)`
+
+  This is the vectorized element‑wise exponential kernel. It consumes 1.113 ms (or 0.9%) of the total time.
+
+  `void at::native::reduce_kernel<(int)512, (int)1, at::native::ReduceOp<float, 
+  at::native::MaxOps<float>, unsigned int, float, (int)4>>(T3)`
+
+  This is the block‑level reduce kernel computing the maximum over elements. It consumes 0.985 ms (or 0.8%) of the total time.
+
+  `void at::native::reduce_kernel<(int)512, (int)1, at::native::ReduceOp<float, 
+  at::native::func_wrapper_t<float, at::native::sum_functor<float, float, 
+  float>::operator ()(at::TensorIterator &)::[lambda(float, float) (instance 1)]>, 
+  unsigned int, float, (int)4>>(T3)`
+
+  This is the block‑level reduce kernel computing the sum over elements. It consumes 0.823 ms (or 0.6%) of the total time.
+
+  `void at::native::vectorized_elementwise_kernel<(int)4, at::native::CUDAFunctor_add<float>, 
+  std::array<char *, (unsigned long)3>>(int, T2, T3)`
+
+  This is the vectorized element‑wise addition kernel. It consumes 0.695 ms (or 0.5%) of the total time.
+
++ 
+
+
+
