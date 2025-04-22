@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import math
+import sys
 
 from einops import einsum
 import torch
@@ -54,60 +55,73 @@ def _sdpa_annotated(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask=None
 # Parse CLI arguments
 def _parse() -> argparse.Namespace:
     p = argparse.ArgumentParser()
+
     size = p.add_mutually_exclusive_group(required=True)
     size.add_argument("--size", choices=_PRESETS.keys())
     size.add_argument("--d_model", type=int)
+
     p.add_argument("--d_ff", type=int)
     p.add_argument("--num-layers", dest="d_layers", type=int)
     p.add_argument("--num-heads", dest="num_heads", type=int)
+
     p.add_argument("--seq-len", type=int, default=128)
     p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--vocab-size", type=int, default=10_000)
+
+    p.add_argument("--warmup", type=int, default=5)
+    p.add_argument("--steps", type=int, default=1)
+
     p.add_argument("--dtype", choices=["fp32", "bf16"], default="fp32")
-    p.add_argument("--device", default="cuda")
     p.add_argument(
         "--compile", action="store_true", help="Whether to wrap model with torch.compile for JIT‑optimised run"
     )
+
     p.add_argument(
         "--annotate-sdpa", action="store_true", help="Whether to annotate scaled_dot_product_attention with NVTX ranges"
     )
     p.add_argument("--mode", choices=["forward", "forward_backward", "train"], default="forward_backward")
-    p.add_argument("--warmup", type=int, default=5)
-    p.add_argument("--steps", type=int, default=1)
+
     return p.parse_args()
 
 
-# Entry point
 def main() -> None:
+    if not torch.cuda.is_available():
+        print("Error: CUDA is not available. This benchmark requires a CUDA-capable GPU.")
+        sys.exit(1)
+
     args = _parse()
 
-    cfg = (
-        _PRESETS[args.size]
-        if args.size
-        else dict(d_model=args.d_model, d_ff=args.d_ff, d_layers=args.d_layers, num_heads=args.num_heads)
-    )
-    device = torch.device(args.device)
+    if args.size:
+        cfg = _PRESETS[args.size]
+    else:
+        required = ("d_model", "d_ff", "d_layers", "num_heads")
+        if any(getattr(args, k) is None for k in required):
+            raise ValueError("Must supply all custom h‑params when --size is omitted")
+        cfg = dict(d_model=args.d_model, d_ff=args.d_ff, d_layers=args.d_layers, num_heads=args.num_heads)
+
     dtype = torch.float32 if args.dtype == "fp32" else torch.bfloat16
+    torch.set_float32_matmul_precision("high")
 
     if args.annotate_sdpa:
-        _m.scaled_dot_product_attention = _sdpa_annotated  # type: ignore[attr-defined]
+        _m.scaled_dot_product_attention = _sdpa_annotated
 
     model = Transformer(
-        vocab_size=10_000,
+        vocab_size=args.vocab_size,
         context_length=args.seq_len,
         d_model=cfg["d_model"],
         num_layers=cfg["d_layers"],
         num_heads=cfg["num_heads"],
         d_ff=cfg["d_ff"],
         rope_theta=10000.0,
-    ).to(device=device, dtype=dtype)
+    ).to(device="cuda", dtype=dtype)
 
     if args.compile:
         model = torch.compile(model)
     model.train(args.mode in ("forward_backward", "train"))
 
     optimizer = AdamW(model.parameters(), lr=1e-3)
-    inputs = torch.randint(0, 10_000, (args.batch_size, args.seq_len), device=device)
-    targets = torch.randint(0, 10_000, (args.batch_size, args.seq_len), device=device)
+    inputs = torch.randint(0, args.vocab_size, (args.batch_size, args.seq_len), device="cuda")
+    targets = torch.randint(0, args.vocab_size, (args.batch_size, args.seq_len), device="cuda")
 
     for _ in range(args.warmup + args.steps):
         mode_str = "warmup." if _ < args.warmup else "profiling."
@@ -115,22 +129,19 @@ def main() -> None:
         with nvtx.range(mode_str + "forward"):
             logits = model(inputs)
 
-        if args.mode == "train":
-            with nvtx.range(mode_str + "loss"):
-                loss = cross_entropy(logits, targets)
-        else:
-            loss = logits.mean()
-
         if args.mode in ("forward_backward", "train"):
+            with nvtx.range(mode_str + "ce_loss"):
+                loss = cross_entropy(logits, targets)
+
             with nvtx.range(mode_str + "backward"):
                 loss.backward()
-        else:
-            model.zero_grad()
 
         if args.mode == "train":
             with nvtx.range(mode_str + "optimizer.step"):
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+        else:
+            model.zero_grad(set_to_none=True)
 
 
 if __name__ == "__main__":

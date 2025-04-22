@@ -28,6 +28,7 @@ import timeit
 import torch
 
 from cs336_basics.model import BasicsTransformerLM as Transformer
+from cs336_basics.nn_utils import cross_entropy
 
 _PRESETS: dict[str, dict[str, int]] = {
     "sm": {"d_model": 768, "d_ff": 3072, "d_layers": 12, "num_heads": 12},
@@ -54,10 +55,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seq-len", type=int, default=128)
     p.add_argument("--vocab-size", type=int, default=10_000)
 
-    p.add_argument("--dtype", choices=["fp32", "bf16"], default="fp32")
-
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--steps", type=int, default=10)
+
+    p.add_argument("--dtype", choices=["fp32", "bf16"], default="fp32")
 
     bw_grp = p.add_mutually_exclusive_group()
     bw_grp.add_argument("--no-backward", dest="do_backward", action="store_false")
@@ -65,41 +66,6 @@ def _parse_args() -> argparse.Namespace:
     p.set_defaults(do_backward=True)
 
     return p.parse_args()
-
-
-def _build_model(cfg: dict[str, int], args: argparse.Namespace) -> Transformer:
-    return Transformer(
-        vocab_size=args.vocab_size,
-        context_length=args.seq_len,
-        d_model=cfg["d_model"],
-        num_layers=cfg["d_layers"],
-        num_heads=cfg["num_heads"],
-        d_ff=cfg["d_ff"],
-        rope_theta=10000.0,
-    )
-
-
-def _time_step(model: Transformer, batch: torch.Tensor, do_backward: bool) -> tuple[float, float]:
-    """Run one iteration and return a *(forward_time, backward_time)* tuple."""
-    torch.cuda.synchronize()
-
-    t0 = timeit.default_timer()
-    if do_backward:
-        logits = model(batch)
-    else:
-        with torch.inference_mode():
-            logits = model(batch)
-    torch.cuda.synchronize()
-    fw_sec = timeit.default_timer() - t0
-
-    bw_sec = 0.0
-    if do_backward:
-        t1 = timeit.default_timer()
-        logits.mean().backward()
-        torch.cuda.synchronize()
-        bw_sec = timeit.default_timer() - t1
-
-    return fw_sec, bw_sec
 
 
 def main() -> None:
@@ -120,25 +86,44 @@ def main() -> None:
     dtype = torch.float32 if args.dtype == "fp32" else torch.bfloat16
     torch.set_float32_matmul_precision("high")
 
-    model = _build_model(cfg, args).to(device="cuda", dtype=dtype)
+    model = Transformer(
+        vocab_size=args.vocab_size,
+        context_length=args.seq_len,
+        d_model=cfg["d_model"],
+        num_layers=cfg["d_layers"],
+        num_heads=cfg["num_heads"],
+        d_ff=cfg["d_ff"],
+        rope_theta=10000.0,
+    ).to(device="cuda", dtype=dtype)
     model.train(args.do_backward)
 
-    batch = torch.randint(0, args.vocab_size, (args.batch_size, args.seq_len), device="cuda")
-
-    for _ in range(args.warmup):
-        _time_step(model, batch, args.do_backward)
-        if args.do_backward:
-            model.zero_grad(set_to_none=True)
+    inputs = torch.randint(0, args.vocab_size, (args.batch_size, args.seq_len), device="cuda")
+    targets = torch.randint(0, args.vocab_size, (args.batch_size, args.seq_len), device="cuda")
 
     fw_samples, bw_samples = [], []
-    for _ in range(args.steps):
-        dt_fw, dt_bw = _time_step(model, batch, args.do_backward)
-        fw_samples.append(dt_fw)
-        bw_samples.append(dt_bw)
+    for i in range(args.warmup + args.steps):
+        torch.cuda.synchronize()
+        t0 = timeit.default_timer()
+        logits = model(inputs)
+        torch.cuda.synchronize()
+        dt_fw = timeit.default_timer() - t0
+
+        dt_bw = 0.0
+        if args.do_backward:
+            loss = cross_entropy(logits, targets)
+            t1 = timeit.default_timer()
+            loss.backward()
+            torch.cuda.synchronize()
+            dt_bw = timeit.default_timer() - t1
+
+        if i >= args.warmup:
+            fw_samples.append(dt_fw)
+            bw_samples.append(dt_bw)
         if args.do_backward:
             model.zero_grad(set_to_none=True)
 
     fw_t = torch.tensor(fw_samples, device="cuda")
+    bw_t = torch.tensor(bw_samples, device="cuda")
 
     mode_str = "forward-only" if not args.do_backward else "forward + backward"
     print(
@@ -147,7 +132,6 @@ def main() -> None:
     print(f"Forward:  {fw_t.mean() * 1e3:.3f} ± {fw_t.std() * 1e3:.3f} ms")
 
     if args.do_backward:
-        bw_t = torch.tensor(bw_samples, device="cuda")
         total = fw_t + bw_t
         print(f"Backward: {bw_t.mean() * 1e3:.3f} ± {bw_t.std() * 1e3:.3f} ms")
         print(f"Total:    {total.mean() * 1e3:.3f} ± {total.std() * 1e3:.3f} ms")

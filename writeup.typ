@@ -199,103 +199,64 @@
   #figure(tablem[
   | *Model* | *128*      | *256*      | *512*       | *1024*     |
   |---------|------------|------------|-------------|------------|
-  | small   | 19.805 ms  | 20.595 ms  | 19.575 ms   | 44.577 ms  |
-  | medium  | 39.319 ms  | 38.625 ms  | 56.818 ms   | 126.23 ms  |
-  | large   | 58.511 ms  | 58.284 ms  | 127.522 ms  | OOM        |
-  | xlarge  | 79.637 ms  | 127.036 ms | 251.931 ms  | OOM        |
-  | 2.7b    | 87.422 ms  | 173.87 ms  | 339.198 ms  | OOM        |
+  | small   | 19.018 ms  | 19.058 ms  | 19.738 ms   | 26.163 ms  |
+  | medium  | 38.074 ms  | 38.077 ms  | 39.196 ms   | 69.533 ms  |
+  | large   | 61.813 ms  | 58.349 ms  | 61.301 ms   | 135.094 ms |
+  | xlarge  | 79.546 ms  | 76.364 ms  | 90.199 ms   | OOM        |
+  | 2.7b    | 53.105 ms  | 62.066 ms  | 106.359 ms  | OOM        |
   ],
   caption: "Forward Pass Total Time (ms) by Model Size and Sequence Length"
   )
 
-  The `nsys` timings are quite significantly different from the timing using `timeit`, particularly for larger models and longer sequence lengths. In general, the `nsys` timings are significantly larger, sometimes by as much as 4-5x.
+  The timings are quite similar to what was observed with `timeit` (generally within 10%).
 
 + Kernel that takes the most cumulative time during the forward pass (large model, sequence length = 512):
 
-  `sm80_xmma_gemm_f32f32_f32f32_f32_tn_n_tilesize128x64x8_stage3_warpsize2x2x1_ffma_aligna4_alignc4
-  _execute_kernel__5x_cublas`
+  `sm90_xmma_gemm_f32f32_tf32f32_f32_tn_n_tilesize128x128x32_warpgroupsize1x1x1_execute_segment
+  _k_off_kernel__5x_cublas`
 
-  This is a general matrix-matrix multiplication kernel where the inputs, accumulator, and outputs are all `float32`.
+  This is a general matrix-matrix multiplication kernel where the inputs, accumulator, and outputs are all `float32`. The particular kernel is different for different model sizes (different tile sizes, etc.), but it's always a general matrix-matrix multiplication kernel.
 
-  Number of instances: 72
+  Number of instances: 109
 
-  This is the same kernel as the one that takes the most cumulative time during the backward pass, and it is invoked the same number of times.
+  This is the same kernel as the one that takes the most cumulative time during the backward pass.
 
-+ Non-MM kernels that take a non-trivial amount of the overall time in the forward pass (large model, sequence length = 512):
++ In general, the non‑matmul kernels that contribute significantly to the forward pass are element‑wise tensor operators—pointwise arithmetic, vectorized element‑wise computations, reductions, and simple data‑movement copies.
 
-  A number of such kernels and their contributions to the total time are listed below. In general, these are element‑wise and block‑level reduction kernels implementing point‑wise arithmetic (mul, div, add, exp, copy, where) and reductions (max, sum) that underlie dropout masking, normalization, gating, activation, residual adds, and other per‑element operations.
+  A few specific examples (listed in decreasing order of contribution):
 
-  `void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<
-  at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>>
-  (at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)`
+  `void at::native::elementwise_kernel<(int)128, (int)2,
+    void at::native::gpu_kernel_impl_nocast<
+        at::native::BinaryFunctor<float, float, float,
+            at::native::binary_internal::MulFunctor<float>>>(
+        at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>
+    (int, T3)`
 
-  This is a general (non-vectorized) element-wise multiplication kernel. It consumes 2.809 ms (or 2.2%) of the total time.
+  `void at::native::vectorized_elementwise_kernel<(int)4,
+    at::native::BinaryFunctor<float, float, float,
+        at::native::binary_internal::MulFunctor<float>>,
+    std::array<char *, (unsigned long)3>>
+    (int, T2, T3)`
 
-  `void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<
-  float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *,
-   (unsigned long)3>>(int, T2, T3)`
+  `void at::native::elementwise_kernel<(int)128, (int)2,
+    void at::native::gpu_kernel_impl_nocast<
+        at::native::BinaryFunctor<float, float, float,
+            at::native::binary_internal::DivFunctor<float>>>(
+        at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>
+    (int, T3)`
 
-  This is vectorized element-wise multiplication kernel. It consumes 1.636 ms (or 1.3%) of the total time.
+  `void at::native::elementwise_kernel<(int)128, (int)2,
+    void at::native::gpu_kernel_impl_nocast<
+        at::native::CUDAFunctor_add<float>>(
+        at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>
+    (int, T3)`
 
-  `void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<
-  at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float>>>
-  (at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)`
 
-  This is a general (non-vectorized) element-wise division kernel. It consumes 1.588 ms (or 1.2%) of the total time.
++ With forward‑pass inference only, the four cublas GEMM kernels (all the `sm90_xmma_gemm_*` kernels) add up to \~36 % of the work.
 
-  `void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<
-  at::native::CUDAFunctor_add<float>> (at::TensorIteratorBase &, const T1 &)::[lambda(int) 
-  (instance 1)]>(int, T3)`
+  During a full training step (forward + backward + AdamW update), those kernels take roughly the same amount of time, but the overall kernel increases significantly because of the many vectorised element‑wise AdamW and reduction kernels (the “vectorized_elementwise_kernel” calls and “reduce_kernel” calls). Consequently, GEMMs now represent only \~19 % of the total. In other words, matrix multiplication’s share of runtime is roughly halved, while inexpensive but numerous element‑wise update kernels (mul/add/div/sqrt/fill) and a few extra reductions become the dominant cost.
 
-  This is a general (non-vectorized) element-wise addition kernel. It consumes 1.417 ms (or 1.1%) of the total time.
-
-  `void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<
-  at::native::<unnamed>::where_kernel_impl(at::TensorIterator &)::[lambda() (instance 1)]
-  ::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(bool, float, float) 
-  (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)`
-
-  This is a general (non-vectorized) kernel specialized for the ternary `where` operation (e.g. `torch.where(condition, x, y)`). It consumes 1.277 ms (or 1.0%) of the total time.
-
-  `void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<float, float,
-   float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)2>>
-   (int, T2, T3)`
-
-  This is the vectorized element‑wise scalar multiplication kernel. It consumes 1.158 ms (or 0.9%) of the total time.
-
-  `void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast
-  <at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::
-  operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) 
-  (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)`
-
-  This is the non‑vectorized element‑wise copy kernel. It consumes 1.145 ms (or 0.9%) of the total time.
-
-  `void at::native::vectorized_elementwise_kernel<(int)4, at::native::exp_kernel_cuda
-  (at::TensorIteratorBase &)::[lambda() (instance 2)]::operator ()() const::[lambda() 
-  (instance 2)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 
-  (unsigned long)2>>(int, T2, T3)`
-
-  This is the vectorized element‑wise exponential kernel. It consumes 1.113 ms (or 0.9%) of the total time.
-
-  `void at::native::reduce_kernel<(int)512, (int)1, at::native::ReduceOp<float, 
-  at::native::MaxOps<float>, unsigned int, float, (int)4>>(T3)`
-
-  This is the block‑level reduce kernel computing the maximum over elements. It consumes 0.985 ms (or 0.8%) of the total time.
-
-  `void at::native::reduce_kernel<(int)512, (int)1, at::native::ReduceOp<float, 
-  at::native::func_wrapper_t<float, at::native::sum_functor<float, float, 
-  float>::operator ()(at::TensorIterator &)::[lambda(float, float) (instance 1)]>, 
-  unsigned int, float, (int)4>>(T3)`
-
-  This is the block‑level reduce kernel computing the sum over elements. It consumes 0.823 ms (or 0.6%) of the total time.
-
-  `void at::native::vectorized_elementwise_kernel<(int)4, at::native::CUDAFunctor_add<float>, 
-  std::array<char *, (unsigned long)3>>(int, T2, T3)`
-
-  This is the vectorized element‑wise addition kernel. It consumes 0.695 ms (or 0.5%) of the total time.
-
-+ Mat‑mul kernels dominate less once back‑prop and AdamW run: their share drops from 80-85% in a forward‑only pass to 60-65% in a full training step. The freed time is picked up mainly by element‑wise vectorized Add/Mul/Div kernels, reduction operations, and the optimizer‑update kernels, which together rise from roughly 20% of runtime to about 33-40%.
-
-+ In many cases, the softmax operation takes as long as computing the attention scores and taking the inner products with the value vectors combined (the softmax:matmul ratio within the attention operation varies from \~0.75x to \~1.5x in my experiments).
++ In many cases, the softmax operation takes as long as computing the attention scores and taking the inner products with the value vectors combined (the softmax:matmul ratio within the attention operation varies from \~0.6x to \~1.2x in my experiments).
 
   This is despite a vastly lower FLOP count (on the order of a 10x difference) for the softmax operation, compared to the matmuls.
 
