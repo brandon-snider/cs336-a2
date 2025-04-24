@@ -1,6 +1,7 @@
 out
 *.out
 *.err
+.DS_Store
 
 336_a2_test_venv/
 cs336-spring2024-assignment-2-submission.zip
