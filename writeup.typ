@@ -262,6 +262,63 @@
 
   This suggests that the softmax operation consumes significantly more wall time per FLOP, yielding poor utilization due to its memory-bound, control-flow-heavy nature.
 
+== Problem (`mixed_precision_accumulation`): 1 point
+
+We get the most accurate result (10.0001) with both the accumulator and the summands in `float32` (the first loop). With the accumulator in `float32` and the summands in `float16` (the third and fourth loops), we get close (10.0021). With the accumulator in `float16`, though, we a much less accurate result (9.9531). This is because, as the spacing between representable values in `float16` increases, many of the of the late additions round away and the sum stalls.
+
+== Problem (`benchmarking_mixed_precision`): 2 points
+
++ Model parameters: `float32`
+  Output of `fc1`: `float16`
+  Output of `ln`: `float32`
+  Predicted logits: `float16`
+  Loss: `float32`
+  Gradients: `float32`
+
++ The sensitive parts are the mean and variance reductions to compute the layer normalization statistics, and the reciprocal square root computation. The sensitivity is due to the possibility of overflow when the intermediate values are held in the $plus.minus$ 65k range of FP16. BF16 matches the dynamic range of FP32. That removes the overflow risk, and makes it possible to run LayerNorm in BF16.
+
++ Forward pass timings (sequence length = 512):
+
+  #figure(tablem[
+  | *Model*   | *BF16 (ms)* | *FP32 (ms)* |
+  |-----------|-------------|-------------|
+  | small     | 22.008      | 20.015      |
+  | medium    | 43.673      | 56.011      |
+  | large     | 67.021      | 130.569     |
+  | xl        | 90.293      | 249.101     |
+  | 2.7B      | 84.217      | 362.488     |
+  ],
+  caption: "Forward Pass Timings (sequence length = 512)"
+  )
+
+  Backward pass timings (sequence length = 512):
+
+  #figure(tablem[
+  | *Model*   | *BF16 (ms)* | *FP32 (ms)* |
+  |-----------|-------------|-------------|
+  | small     | 27.576      | 41.988      |
+  | medium    | 54.394      | 114.903     |
+  | large     | 79.397      | 259.485     |
+  | xl        | 137.134     | 503.508     |
+  | 2.7B      | 149.459     | 716.287     |
+  ],
+  caption: "Backward Pass Timings (sequence length = 512)"
+  )
+  
+  BF16 is fatster than FP16 for all model sizes. At smaller sizes, the difference in forward pass timings is small, though the difference in backward pass timings is still significant. As the size increases, the difference grows dramatically. This makes intuitive sense, given that matmuls come to dominate the wall clock time when running a forward pass in FP32, and those are the operations for which we get the most benefit from running using mixed precision.
 
 
+== Problem (`memory_profiling`): 4 points
 
++ 
+  #figure(image("images/mem_2.7b_f_512.png"), caption: "Memory Profile (FP32, 2.7B, forward pass only, 512 sequence length)")
+
+  #figure(image("images/mem_2.7b_fbs_512.png"), caption: "Memory Profile (FP32, 2.7B, full train step, 512 sequence length)")
+
++ \@TODO
+
++ \@TODO
+
++ \@TODO
+
++ \@TODO
