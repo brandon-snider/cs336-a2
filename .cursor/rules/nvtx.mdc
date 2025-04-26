@@ -1,7 +1,7 @@
 ---
-description: 
+description: Using the correct syntax for GPU profiling code that uses NVTX.
 globs: 
-alwaysApply: true
+alwaysApply: false
 ---
 
 # NVTX Usage

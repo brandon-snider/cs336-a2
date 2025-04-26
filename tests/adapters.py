@@ -1,9 +1,9 @@
 from __future__ import annotations
+from cs336_systems.flash_torch import FlashTorch
 
 from typing import Type
 
 import torch
-
 
 
 def get_flashattention_autograd_function_pytorch() -> Type:
@@ -15,8 +15,7 @@ def get_flashattention_autograd_function_pytorch() -> Type:
     Returns:
         A class object (not an instance of the class)
     """
-    # For example: return MyRMSNormAutogradFunctionClass
-    raise NotImplementedError
+    return FlashTorch
 
 
 def get_flashattention_autograd_function_triton() -> Type:
