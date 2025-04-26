@@ -12,7 +12,7 @@ Flags:
   --size: sm, md, lg, xl, 2.7b
   --d_model: int
   --d_ff: int
-  --d_layers: int
+  --num_layers: int
   --num_heads: int
   --batch_size: int
   --seq_len: int
@@ -30,17 +30,24 @@ from contextlib import nullcontext
 import sys
 import timeit
 import torch
+import os
 
 from cs336_basics.optimizer import AdamW
 from cs336_basics.model import BasicsTransformerLM as Transformer
 from cs336_basics.nn_utils import cross_entropy
 
 _PRESETS: dict[str, dict[str, int]] = {
-    "sm": {"d_model": 768, "d_ff": 3072, "d_layers": 12, "num_heads": 12},
-    "md": {"d_model": 1024, "d_ff": 4096, "d_layers": 24, "num_heads": 16},
-    "lg": {"d_model": 1280, "d_ff": 5120, "d_layers": 36, "num_heads": 20},
-    "xl": {"d_model": 1600, "d_ff": 6400, "d_layers": 48, "num_heads": 25},
-    "2.7b": {"d_model": 2560, "d_ff": 10240, "d_layers": 32, "num_heads": 32},
+    "sm": {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12},
+    "md": {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16},
+    "lg": {"d_model": 1280, "d_ff": 5120, "num_layers": 36, "num_heads": 20},
+    "xl": {"d_model": 1600, "d_ff": 6400, "num_layers": 48, "num_heads": 25},
+    "2.7b": {"d_model": 2560, "d_ff": 10240, "num_layers": 32, "num_heads": 32},
+}
+
+_MODE_NAME_MAP = {
+    "forward": "f",
+    "forward_backward": "fb",
+    "train": "fbs",
 }
 
 
@@ -53,7 +60,7 @@ def _parse_args() -> argparse.Namespace:
     size_grp.add_argument("--d_model", type=int)
 
     p.add_argument("--d_ff", type=int)
-    p.add_argument("--num-layers", dest="d_layers", type=int)
+    p.add_argument("--num-layers", dest="num_layers", type=int)
     p.add_argument("--num-heads", dest="num_heads", type=int)
 
     p.add_argument("--batch-size", type=int, default=4)
@@ -64,141 +71,193 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--steps", type=int, default=10)
 
     p.add_argument("--mixed", action="store_true")
-    p.add_argument("--compile", action="store_true")
+    p.add_argument("--compile", dest="compile_model", action="store_true")
 
-    p.add_argument("--mode", choices=["forward", "forward_backward", "train"], default="forward_backward")
+    p.add_argument("--mode", choices=["forward", "forward_backward", "train"], default="forward")
 
-    p.add_argument("--memory", action="store_true")
+    p.add_argument("--memory", dest="profile_memory", action="store_true")
 
     return p.parse_args()
 
 
-def main() -> None:
-    if not torch.cuda.is_available():
-        print("Error: CUDA is not available. This benchmark requires a CUDA-capable GPU.")
-        sys.exit(1)
+def run_benchmark(
+    model_config: dict[str, any],
+    batch_size: int,
+    seq_len: int,
+    vocab_size: int,
+    warmup: int,
+    steps: int,
+    mixed: bool,
+    compile_model: bool,
+    mode: str,
+    profile_memory: bool,
+    size_name: str | None = None,
+    device: str = "cuda",
+) -> dict[str, float]:
+    """
+    Runs the benchmark with the given configuration.
 
-    args = _parse_args()
+    Args:
+        model_config: Dictionary containing model hyperparameters (d_model, d_ff, etc.).
+        batch_size: Batch size for inputs.
+        seq_len: Sequence length for inputs.
+        vocab_size: Vocabulary size.
+        warmup: Number of warmup steps.
+        steps: Number of measured steps.
+        mixed: Whether to use mixed precision (bfloat16).
+        compile_model: Whether to compile the model with torch.compile.
+        mode: Execution mode ('forward', 'forward_backward', 'train').
+        profile_memory: Whether to profile memory usage and save snapshot.
+        size_name: Name of the model size preset (e.g., 'sm') if used, for filename.
+        device: The device to run on (e.g., 'cuda').
 
-    if args.size:
-        cfg = _PRESETS[args.size]
-    else:
-        required = ("d_model", "d_ff", "d_layers", "num_heads")
-        if any(getattr(args, k) is None for k in required):
-            raise ValueError("Must supply all custom h‑params when --size is omitted")
-        cfg = dict(d_model=args.d_model, d_ff=args.d_ff, d_layers=args.d_layers, num_heads=args.num_heads)
+    Returns:
+        A dictionary containing timing statistics (mean, std, percentage) for
+        forward, backward (if applicable), optimizer (if applicable), and total steps.
+    """
+    if not torch.cuda.is_available() and device == "cuda":
+        raise RuntimeError("CUDA is not available, but device='cuda' was requested.")
 
-    # torch.set_float32_matmul_precision("high")
+    # Ensure model_config uses 'num_layers' key if it exists
+    if "d_layers" in model_config:
+        model_config["num_layers"] = model_config.pop("d_layers")
 
-    model = Transformer(
-        vocab_size=args.vocab_size,
-        context_length=args.seq_len,
-        d_model=cfg["d_model"],
-        num_layers=cfg["d_layers"],
-        num_heads=cfg["num_heads"],
-        d_ff=cfg["d_ff"],
+    model: torch.nn.Module = Transformer(
+        vocab_size=vocab_size,
+        context_length=seq_len,
+        **model_config,
         rope_theta=10000.0,
-    ).to(device="cuda")
-    if args.compile:
+    ).to(device=device)
+
+    if compile_model:
         model = torch.compile(model)
-        print("Compiled model")
 
-    model.train(args.mode in ("forward_backward", "train"))
-    optimizer = AdamW(model.parameters(), lr=1e-3)
+    model.train(mode in ("forward_backward", "train"))
+    optimizer = AdamW(model.parameters(), lr=1e-3) if mode == "train" else None
 
-    inputs = torch.randint(0, args.vocab_size, (args.batch_size, args.seq_len), device="cuda")
-    targets = torch.randint(0, args.vocab_size, (args.batch_size, args.seq_len), device="cuda")
+    inputs = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+    targets = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
 
-    if args.mixed:
-        print("Using mixed precision")
-
-    f_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if args.mixed else nullcontext()
+    f_ctx = torch.autocast(device_type=device, dtype=torch.bfloat16) if mixed else nullcontext()
 
     fw_samples, bw_samples, opt_samples = [], [], []
 
     with f_ctx:
-        for i in range(args.warmup + args.steps):
-            if i == args.warmup and args.memory:
+        for i in range(warmup + steps):
+            if i == warmup and profile_memory:
                 torch.cuda.memory._record_memory_history(max_entries=1000000)
 
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device=device)
             t0 = timeit.default_timer()
             logits = model(inputs)
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device=device)
             dt_fw = timeit.default_timer() - t0
 
             dt_bw = 0.0
-            if args.mode in ("forward_backward", "train"):
+            if mode in ("forward_backward", "train"):
                 loss = cross_entropy(logits, targets)
                 t1 = timeit.default_timer()
                 loss.backward()
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(device=device)
                 dt_bw = timeit.default_timer() - t1
 
             dt_opt = 0.0
-            if args.mode == "train":
-                torch.cuda.synchronize()
+            if mode == "train":
+                torch.cuda.synchronize(device=device)
                 t2 = timeit.default_timer()
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(device=device)
                 dt_opt = timeit.default_timer() - t2
             else:
                 model.zero_grad(set_to_none=True)
 
-            if i >= args.warmup:
+            if i >= warmup:
                 fw_samples.append(dt_fw)
                 bw_samples.append(dt_bw)
                 opt_samples.append(dt_opt)
 
-    if args.memory:
-        mem_name_map = {
-            "forward": "f",
-            "forward_backward": "fb",
-            "train": "fbs",
-        }
+    if profile_memory:
+        m = _MODE_NAME_MAP[mode]
+        d = "bf16" if mixed else "fp32"
 
-        m = mem_name_map[args.mode]
-        d = "bf16" if args.mixed else "fp32"
-        torch.cuda.memory._dump_snapshot(f"out/memory/mem_{d}_{args.size}_{m}_{args.seq_len}.pickle")
+        size_str = size_name if size_name else f"custom_d{model_config['d_model']}"
+        output_dir = "out/memory"
+        os.makedirs(output_dir, exist_ok=True)
+        torch.cuda.memory._dump_snapshot(f"{output_dir}/mem_{d}_{size_str}_{m}_{seq_len}.pickle")
         torch.cuda.memory._record_memory_history(enabled=None)
 
-    fw_t = torch.tensor(fw_samples, device="cuda")
-    bw_t = torch.tensor(bw_samples, device="cuda")
-    opt_t = torch.tensor(opt_samples, device="cuda")
-    total = fw_t + bw_t + opt_t
+    fw_t = torch.tensor(fw_samples, device=device)
+    bw_t = torch.tensor(bw_samples, device=device)
+    opt_t = torch.tensor(opt_samples, device=device)
+    total_t = fw_t + bw_t + opt_t
 
-    fw_t_mean = fw_t.mean()
-    fw_t_std = fw_t.std() if len(fw_t) > 1 else 0.0
-    fw_t_pct = (fw_t / total).mean() * 100
+    results = {}
 
-    bw_t_mean = bw_t.mean()
-    bw_t_std = bw_t.std() if len(bw_t) > 1 else 0.0
-    bw_t_pct = (bw_t / total).mean() * 100
+    results["fw_mean_ms"] = fw_t.mean().item() * 1e3
+    results["fw_std_ms"] = fw_t.std().item() * 1e3 if len(fw_t) > 1 else 0.0
+    results["fw_pct"] = (fw_t / total_t).mean().item() * 100 if total_t.mean() > 0 else 0.0
 
-    opt_t_mean = opt_t.mean()
-    opt_t_std = opt_t.std() if len(opt_t) > 1 else 0.0
-    opt_t_pct = (opt_t / total).mean() * 100
-
-    total_mean = total.mean()
-    total_std = total.std() if len(total) > 1 else 0.0
-    total_pct = (total / total).mean() * 100
-
-    print(
-        f"Timings for {args.size} model, batch size {args.batch_size}, seq len {args.seq_len}, {args.mode} over {args.steps} steps:"
+    results["bw_mean_ms"] = bw_t.mean().item() * 1e3 if mode in ("forward_backward", "train") else 0.0
+    results["bw_std_ms"] = bw_t.std().item() * 1e3 if len(bw_t) > 1 and mode in ("forward_backward", "train") else 0.0
+    results["bw_pct"] = (
+        (bw_t / total_t).mean().item() * 100 if total_t.mean() > 0 and mode in ("forward_backward", "train") else 0.0
     )
 
-    print(f"Forward:  {fw_t_mean * 1e3:.3f} ± {fw_t_std * 1e3:.3f} ms ({fw_t_pct:.1f}%)")
+    results["opt_mean_ms"] = opt_t.mean().item() * 1e3 if mode == "train" else 0.0
+    results["opt_std_ms"] = opt_t.std().item() * 1e3 if len(opt_t) > 1 and mode == "train" else 0.0
+    results["opt_pct"] = (opt_t / total_t).mean().item() * 100 if total_t.mean() > 0 and mode == "train" else 0.0
 
-    if args.mode in ("forward_backward", "train"):
-        print(f"Backward: {bw_t_mean * 1e3:.3f} ± {bw_t_std * 1e3:.3f} ms ({bw_t_pct:.1f}%)")
+    results["total_mean_ms"] = total_t.mean().item() * 1e3
+    results["total_std_ms"] = total_t.std().item() * 1e3 if len(total_t) > 1 else 0.0
+    results["total_pct"] = 100.0
 
-    if args.mode == "train":
-        print(f"Optimizer: {opt_t_mean * 1e3:.3f} ± {opt_t_std * 1e3:.3f} ms ({opt_t_pct:.1f}%)")
+    return results
 
-    print(f"Total:    {total_mean * 1e3:.3f} ± {total_std * 1e3:.3f} ms ({total_pct:.1f}%)")
 
-    print("-" * 80)
+def main() -> None:
+    if not torch.cuda.is_available():
+        print("Error: CUDA is not available. This benchmark requires a CUDA-capable GPU.", file=sys.stderr)
+        sys.exit(1)
+
+    args = _parse_args()
+    size_name = args.size
+
+    if args.size:
+        cfg = _PRESETS[args.size].copy()
+    else:
+        required = ("d_model", "d_ff", "num_layers", "num_heads")
+        if any(getattr(args, k) is None for k in required):
+            print(
+                "Error: Must supply all of --d_model, --d_ff, --num-layers, --num-heads when --size is omitted.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        cfg = dict(d_model=args.d_model, d_ff=args.d_ff, num_layers=args.num_layers, num_heads=args.num_heads)
+
+    results = run_benchmark(
+        model_config=cfg,
+        batch_size=args.batch_size,
+        seq_len=args.seq_len,
+        vocab_size=args.vocab_size,
+        warmup=args.warmup,
+        steps=args.steps,
+        mixed=args.mixed,
+        compile_model=args.compile_model,
+        mode=args.mode,
+        profile_memory=args.profile_memory,
+        size_name=size_name,
+        device="cuda",
+    )
+
+    size_str = size_name if size_name else f"custom_d{cfg['d_model']}"
+
+    print("size\tbsz\tseq\tmode\tcompile\tmixed\tfw_ms\tbw_ms\topt_ms\ttotal_ms")
+
+    print(
+        f"{size_str}\t{args.batch_size}\t{args.seq_len}\t{_MODE_NAME_MAP[args.mode]}\t{args.compile_model}\t{args.mixed}\t"
+        f"{results['fw_mean_ms']:.3f}\t{results['bw_mean_ms']:.3f}\t{results['opt_mean_ms']:.3f}\t{results['total_mean_ms']:.3f}"
+    )
 
 
 if __name__ == "__main__":

@@ -30,7 +30,12 @@
 #set heading(numbering: none)
 #show link: underline
 
-= 1. Profiling and Benchmarking
+#set table(
+    inset: 6pt, // default is 5pt
+    stroke: (0.5pt + stroke-color),
+)
+
+= 1.1 Profiling and Benchmarking
 
 == Problem (`benchmarking_script`): 4 points
 
@@ -254,7 +259,7 @@
 
 + With forward‑pass inference only, the four cublas GEMM kernels (all the `sm90_xmma_gemm_*` kernels) add up to \~36 % of the work.
 
-  During a full training step (forward + backward + AdamW update), those kernels take roughly the same amount of time, but the overall kernel increases significantly because of the many vectorised element‑wise AdamW and reduction kernels (the “vectorized_elementwise_kernel” calls and “reduce_kernel” calls). Consequently, GEMMs now represent only \~19 % of the total. In other words, matrix multiplication’s share of runtime is roughly halved, while inexpensive but numerous element‑wise update kernels (mul/add/div/sqrt/fill) and a few extra reductions become the dominant cost.
+  During a full training step (forward + backward + AdamW update), those kernels take roughly the same amount of time, but the overall kernel increases significantly because of the many vectorised element‑wise AdamW and reduction kernels (the "vectorized_elementwise_kernel" calls and "reduce_kernel" calls). Consequently, GEMMs now represent only \~19 % of the total. In other words, matrix multiplication's share of runtime is roughly halved, while inexpensive but numerous element‑wise update kernels (mul/add/div/sqrt/fill) and a few extra reductions become the dominant cost.
 
 + In many cases, the softmax operation takes as long as computing the attention scores and taking the inner products with the value vectors combined (the softmax:matmul ratio within the attention operation varies from \~0.6x to \~1.2x in my experiments).
 
@@ -315,10 +320,142 @@ We get the most accurate result (10.0001) with both the accumulator and the summ
 
   #figure(image("images/mem_2.7b_fbs_512.png"), caption: "Memory Profile (FP32, 2.7B, full train step, 512 sequence length)")
 
-+ \@TODO
+  In both memory timelines, active memory rises from the  to a peak of about 70GB during the forward pass, when memory is being allocated for the activations. In the forward-only run, the timeline is almost a perfect triangle, as memory declines sharply back to the weight-only baseline at the end of the forwrd pass. In the full training step, the descent is shallower — during the backward pass, each activations are iteratively freed after gradients have been materialised (for which memory is allocated), so memory hovers in the mid-50GB range. It plateaus there while the optimizer updates the parameters, and finally drops to the a steady state that is larger than the initial baseline due to the optimizer state. The peak identifies the end of the forward pass, the long sloping shoulder is the backward pass, and the flat tail is the optimizer step.
 
-+ \@TODO
++ Peak memory usage by sequence length for 2.7b model:
 
-+ \@TODO
+  #figure(tablem[
+  | *Sequence Length* | *Forward Pass (GB)* | *Full Training Step (GB)* |
+  |------------------|---------------------|---------------------------|
+  | 128             | 23.1               | 51.1                      |
+  | 256             | 35.5               | 51.2                      |
+  | 512             | 65.1               | 65.4                      |
+  ],
+  caption: "Peak Memory Usage by Sequence Length for 2.7B Model"
+  )
 
-+ \@TODO
++ At shorter sequence lengths, mixed precision does not seem to significantly reduce memory usage (I see very similar numbers for peak memory usage at sequence lengths of 128 and 256, whether running the forward pass only or the full training step). At a sequence length of 512, however, the memory usage for a forward pass dropped from \~66GB without mixed precision to \~54GB with it. The reduction was less dramatic for the full training step, in which memory usage dropped from \~66GB to \~62GB.
+
++ Answer (sequence length = 512, batch size = 4): 20MB
+
+  Derivation:
+
+  $
+  "elements" = B times L times d_"model" = 4 times 512 times 2560 = 5,242,880 \
+  "bytes" = "elements" times 4 = 20,971,520 \
+  "MB" = "bytes" / 1024^2 = 20
+  $
+
++ At a low detail level, I consistently see allocations of 128MB. These appear to be the attention-probability matrices in the attention blocks in each layer, which would be of size $4 * (4 * 32 * 512 * 512) / (1024^2) = 128 "MB"$.
+
+= 1.2 Optimizing Attention with FlashAttention-2
+
+== Problem (`pytorch_attention`): 2 points
+
++ Timings and memory usage (just before backward pass) of `scaled_dot_product_attention` for different $d_"model"$ and sequence lengths:
+
+  #figure(tablem[
+  | *Seq. Len* | *Forward (ms)* | *Backward (ms)* | *Memory Usage (MB)* |
+  |------------------|---------------------|----------------------|---------------------|
+  | 256             | 0.09               | 0.45                 | 70                  |
+  | 1024            | 0.22               | 0.85                 | 103                 |
+  | 4096            | 2.54               | 8.22                 | 613                 |
+  | 8192            | 9.93               | 31.72                | 2232                |
+  | 16384           | 38.91              | 125.12               | 8692                |
+  ],
+  caption: "Timings for d_model = 16"
+  )
+
+  #figure(tablem[
+  | *Seq. Len* | *Forward (ms)* | *Backward (ms)* | *Memory Usage (MB)* |
+  |------------------|---------------------|----------------------|---------------------|
+  | 256             | 0.10               | 0.46                 | 70                  |
+  | 1024            | 0.23               | 0.84                 | 105                 |
+  | 4096            | 2.61               | 8.38                 | 621                 |
+  | 8192            | 10.25              | 32.34                | 2249                |
+  | 16384           | 40.16              | 127.58               | 8726                |
+  ],
+  caption: "Timings for d_model = 32"
+  )
+
+  #figure(tablem[
+  | *Seq. Len* | *Forward (ms)* | *Backward (ms)* | *Memory Usage (MB)* |
+  |------------------|---------------------|----------------------|---------------------|
+  | 256             | 0.10               | 0.47                 | 71                  |
+  | 1024            | 0.25               | 0.88                 | 109                 |
+  | 4096            | 2.89               | 8.94                 | 638                 |
+  | 8192            | 11.46              | 34.76                | 2282                |
+  | 16384           | 45.34              | 137.91               | 8793                |
+  ],
+  caption: "Timings for d_model = 64"
+  )
+
+  #figure(tablem[
+  | *Seq. Len* | *Forward (ms)* | *Backward (ms)* | *Memory Usage (MB)* |
+  |------------------|---------------------|----------------------|---------------------|
+  | 256             | 0.09               | 0.46                 | 73                  |
+  | 1024            | 0.29               | 0.96                 | 118                 |
+  | 4096            | 3.48               | 10.13                | 671                 |
+  | 8192            | 13.71              | 39.28                | 2350                |
+  | 16384           | 54.20              | 155.69               | 8927                |
+  ],
+  caption: "Timings for d_model = 128"
+  )
+
+  I did not hit out of memory errors for any of these configurations.
+
+  Memory usage of `scaled_dot_product_attention` just before the backward pass, assuming the full $L times L$ attention matrix is stored, along with inputs Q, K, V, and the output O (Batch size $B = 8$, sequence length $L = 16384$, head dimension $d = 128$, data type `float32`):
+
+  $
+  // Size of Q, K, V, O (float32 = 4 bytes)
+  "mem"_(Q, K, V, O) &= 4 times B times L times d times 4 \
+  "mem"_(Q, K, V, O) &= 4 times 8 times 16384 times 128 times 4 = 268,435,456 " bytes" \
+
+  // Size of Attention Matrix P (float32 = 4 bytes)
+  "mem"_P &= B times L^2 times 4 \
+  "mem"_P &= 8 times 16384^2 times 4 = 8,589,934,592 " bytes" \
+
+  // Total memory
+  "mem"_("total") &= "mem"_(Q, K, V, O) + "mem"_P \
+  "mem"_("total") &= 268,435,456 + 8,589,934,592 = 8,858,370,048 " bytes" \
+
+  // Convert to MB
+  "MB" &= "mem"_("total") / 1024^2 approx 8448 " MB"
+  $
+
+  The memory saved for backward changes with the square of the sequence length, as expected.
+
+  To eliminate this cost, we need to avoid materializing the full attention probability matrix $P$, which uses $O(L^2)$ memory. We can do this by tiling/blocking the attention operation. We iterate through blocks of the key ($K$) and value ($V$) matrices. For each block of queries ($Q$), we compute partial attention scores against a block of $K$. We use these to update online softmax statistics (a running maximum and normalizer) and immediately compute a weighted sum of the corresponding $V$ block. The weighted sum is accumulated into the final output block corresponding to $Q$. The backward pass then recomputes necessary attention components on-the-fly instead of relying on a stored $P$ from the forward pass.
+
+= 1.3 Benchmarking JIT-Compiled Attention
+
+== Problem (`torch_compile`): 2 points
+
++ Timings and memory usage for `scaled_dot_product_attention` with and without `torch.compile` ($d_"model" = 128$, all times in milliseconds):
+
+  #figure(tablem[
+  | *Seq. Len* | *Fwd* | *Fwd Comp* | *Bwd* | *Bwd Comp* | *Mem* | *Mem Comp* |
+  |------------|------------|-----------------|------------|-----------------|------------|-----------------|
+  | 256        | 0.09       | 0.09            | 0.46       | 0.50            | 73         | 73              |
+  | 1024       | 0.29       | 0.21            | 0.96       | 0.71            | 118        | 118             |
+  | 4096       | 3.48       | 2.31            | 10.13      | 5.73            | 671        | 672             |
+  | 8192       | 13.71      | 8.97            | 39.28      | 21.89           | 2350       | 2350            |
+  | 16384      | 54.20      | 54.42           | 155.69     | 156.22          | 8927       | 8927            |
+  ],
+  caption: "Attention performance with/without JIT compilation (d_model=128)"
+  )
+
+  We see that JIT compilation offers some benefit within a relatively narrow range of sequence lengths. Outside of that range, neither time nor memory usage is significantly affected.
+
++ Timings for the medium model (batch size = 4, sequence length = 1024) with and without `torch.compile` (all times in milliseconds):
+
+  #figure(tablem[
+  | *Compiled?* | *Fwd (fwd-only)* | *Fwd (full)* | *Bwd* | *Opt* | *Total* |
+  |-------------|----------------------|------------------|------------|------------|--------------|
+  | No          | 125.94               | 126.10           | 256.67     | 24.07      | 406.84       |
+  | Yes         | 90.48                | 90.73            | 185.06     | 23.65      | 299.44       |
+  ],
+  caption: "Full Model Timings (Medium, B=4, L=1024) with/without JIT Compilation"
+  )
+
+  
