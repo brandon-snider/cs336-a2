@@ -1,16 +1,20 @@
 """
 Benchmarking script for vanilla PyTorch attention vs. Triton FlashAttention-2
 
-run with:  uv run -m cs336_systems.flash_triton_benchmark  (≈ 2–3 min on a single H100)
+run with:  uv run -m cs336_systems.flash_triton_benchmark
 """
 
 import itertools
 import time
 import torch
 import triton.testing as ttesting
-from tabulate import tabulate  # pip install tabulate
+import torch._dynamo.config
+from tabulate import tabulate
 from cs336_systems.flash_triton import FlashTriton
 from cs336_basics.model import scaled_dot_product_attention
+
+WARMUP = 25
+REP = 100
 
 
 def mk_causal_mask(S: int, device):
@@ -19,13 +23,13 @@ def mk_causal_mask(S: int, device):
 
 
 def bench_forward(fn, *tensors):
-    return ttesting.do_bench(lambda: fn(*tensors)) * 1e3  # ms
+    return ttesting.do_bench(lambda: fn(*tensors), warmup=WARMUP, rep=REP)
 
 
 def bench_backward(fwd_fn, *inps):
     """
     Measure *only* backward: run fwd once outside the timed region to get the ctx,
-    then backward inside `do_bench`.  This matches the spec's notion of "backward".
+    then backward inside `do_bench`.
     """
     for x in inps:
         x.requires_grad_(True)
@@ -33,15 +37,15 @@ def bench_backward(fwd_fn, *inps):
     grad_out = torch.randn_like(out)
 
     def _backward():
-        out.backward(grad_out, retain_graph=True)  # only bwd is timed
+        out.backward(grad_out, retain_graph=True)
         for x in inps:
-            x.grad = None  # clear for next iter
+            x.grad = None
 
-    return ttesting.do_bench(_backward) * 1e3
+    return ttesting.do_bench(_backward, warmup=WARMUP, rep=REP)
 
 
 def bench_total(fwd_fn, *inps):
-    """Full forward + backward in one call (loss = sum(O))."""
+    """Full forward + backward in one call"""
     for x in inps:
         x.requires_grad_(True)
 
@@ -51,7 +55,7 @@ def bench_total(fwd_fn, *inps):
         for x in inps:
             x.grad = None
 
-    return ttesting.do_bench(_step) * 1e3
+    return ttesting.do_bench(_step, warmup=WARMUP, rep=REP)
 
 
 def run_one(seq_len: int, d_model: int, dtype: torch.dtype, device: str):
@@ -67,7 +71,7 @@ def run_one(seq_len: int, d_model: int, dtype: torch.dtype, device: str):
     py_fwd, py_bwd, py_tot = "OOM", "OOM", "OOM"
     tr_fwd, tr_bwd, tr_tot = "OOM", "OOM", "OOM"
 
-    # ---- PyTorch reference ----
+    # PyTorch reference
     try:
         mask = mk_causal_mask(seq_len, device)
 
@@ -77,13 +81,13 @@ def run_one(seq_len: int, d_model: int, dtype: torch.dtype, device: str):
         py_fwd = bench_forward(_torch_fwd, Q, K, V)
         py_bwd = bench_backward(_torch_fwd, Q.clone(), K.clone(), V.clone())
         py_tot = bench_total(_torch_fwd, Q.clone(), K.clone(), V.clone())
-        torch.cuda.synchronize()  # Ensure operations finish before timing/clearing cache
+        torch.cuda.synchronize()
     except torch.cuda.OutOfMemoryError:
         print(f"OOM (PyTorch) S={seq_len:<6}  d={d_model:<4}  {dtype}")
     finally:
         torch.cuda.empty_cache()
 
-    # ---- Triton FlashAttention-2 ----
+    # (Partially) Triton FlashAttention-2
     try:
 
         def _flash_fwd(Q_, K_, V_):
@@ -102,19 +106,16 @@ def run_one(seq_len: int, d_model: int, dtype: torch.dtype, device: str):
 
 
 def main():
+    torch._dynamo.config.cache_size_limit = 64
     device = "cuda"
 
-    seq_lens = [2**p for p in range(7, 17)]  # 128 … 65 536
-    d_models = [2**p for p in range(4, 8)]  #   16 …    128
+    seq_lens = [2**p for p in range(7, 17)]
+    d_models = [2**p for p in range(4, 8)]
     dtypes = [torch.bfloat16, torch.float32]
     dtype_n = {torch.bfloat16: "bf16", torch.float32: "fp32"}
 
     rows = []
-    for S, D, dt in itertools.product(seq_lens, d_models, dtypes):
-        # BF16 matmuls need shapes multiple of 16 on Ampere/Hopper – skip invalid combos
-        if dt == torch.bfloat16 and D % 8:  # 8 is OK on Hopper, but keep simple
-            continue
-
+    for dt, S, D in itertools.product(dtypes, seq_lens, d_models):
         print(f"Running S={S:<6}  d={D:<4}  {dtype_n[dt]}...")
 
         torch.manual_seed(0)
@@ -123,12 +124,12 @@ def main():
         pf, pb, pt, tf, tb, tt = run_one(S, D, dt, device)
 
         # Format results or keep "OOM"
-        pf_s = f"{pf:6.1f}" if isinstance(pf, float) else pf
-        pb_s = f"{pb:6.1f}" if isinstance(pb, float) else pb
-        pt_s = f"{pt:6.1f}" if isinstance(pt, float) else pt
-        tf_s = f"{tf:6.1f}" if isinstance(tf, float) else tf
-        tb_s = f"{tb:6.1f}" if isinstance(tb, float) else tb
-        tt_s = f"{tt:6.1f}" if isinstance(tt, float) else tt
+        pf_s = f"{pf:6.3f}" if isinstance(pf, float) else pf
+        pb_s = f"{pb:6.3f}" if isinstance(pb, float) else pb
+        pt_s = f"{pt:6.3f}" if isinstance(pt, float) else pt
+        tf_s = f"{tf:6.3f}" if isinstance(tf, float) else tf
+        tb_s = f"{tb:6.3f}" if isinstance(tb, float) else tb
+        tt_s = f"{tt:6.3f}" if isinstance(tt, float) else tt
 
         # Calculate speedup only if both ran successfully
         speedup_fwd_s = "N/A"
