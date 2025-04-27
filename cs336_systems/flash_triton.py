@@ -6,7 +6,7 @@ import triton.language as tl
 from einops import rearrange
 
 
-@torch.compile
+@torch.compile(fullgraph=True)
 def _flash_bwd_inner(dO, L, Q, K, V, O, S, scale, is_causal):
     """Compiled inner loop for flash attention backward pass."""
     D = (dO * O).sum(dim=-1)
@@ -16,17 +16,16 @@ def _flash_bwd_inner(dO, L, Q, K, V, O, S, scale, is_causal):
         mask = torch.tril(torch.ones(S, S, dtype=torch.bool, device=S_scores.device))
         S_scores = S_scores.masked_fill(~mask, float("-inf"))
 
-    P = torch.exp(S_scores - L.unsqueeze(-1))
+    P = torch.exp(S_scores - L.unsqueeze(-1)).to(Q.dtype)
     if is_causal:
         mask = torch.tril(torch.ones(S, S, dtype=P.dtype, device=P.device))
         P = P * mask
 
     dV = P.transpose(-2, -1) @ dO
     dP = dO @ V.transpose(-2, -1)
-    dS = P * (dP - D.unsqueeze(-1))
+    dS = P * (dP - D.unsqueeze(-1)).to(Q.dtype)
     dQ = (dS @ K) * scale
     dK = (dS.transpose(-2, -1) @ Q) * scale
-
     return dQ, dK, dV
 
 
@@ -46,8 +45,8 @@ class FlashTriton(torch.autograd.Function):
         *batch_dims, seq_len, d = Q.shape
         B = math.prod(batch_dims)  # total launch grid height
 
-        Q_T = min(128, seq_len)  # query‑tile rows
-        K_T = min(128, K.shape[-2])  # key‑tile cols
+        Q_T = min(64, seq_len)  # query‑tile rows
+        K_T = min(64, K.shape[-2])  # key‑tile cols
         Tq = triton.cdiv(seq_len, Q_T)  # number of query tiles
 
         # Flatten batch-like dims
