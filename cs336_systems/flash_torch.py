@@ -28,8 +28,6 @@ class FlashTorch(torch.autograd.Function):
         Produces the output tensor O of shape (*batch_dims, seq_len, head_dim), and the logsumexp tensor L
         of shape (*batch_dims, seq_len). Saves L, Q, K, V, O to ctx for the backward pass, and returns O.
 
-        Note: is_causal is ignored in this implementation.
-
         Returns:
           - O: Output tensor of shape (*batch_dims, seq_len, head_dim)
         """
@@ -85,7 +83,7 @@ class FlashTorch(torch.autograd.Function):
                 weighted_values_tile = einsum(exp_scores_tile_hat, values, "b q k, b k h -> b q h")
                 out_tile = torch.diag_embed(exp_max_diff) @ out_tile + weighted_values_tile
 
-            # Update O_tiles and L_tiles, which also updates O and L in place
+            # Normalise and write results back to the untiled view
             O_tiles[:, i] = torch.diag_embed(1.0 / logsumexps_so_far) @ out_tile
             L_tiles[:, i] = row_maxes_so_far + torch.log(logsumexps_so_far)
 
@@ -94,5 +92,31 @@ class FlashTorch(torch.autograd.Function):
         return O
 
     @staticmethod
-    def backward(ctx, d_out: torch.Tensor):
-        raise NotImplementedError("Backward pass not implemented")
+    def backward(ctx, dO: torch.Tensor):
+        """
+        Implements the backward pass for the FlashAttention-2 forward pass.
+
+        Args:
+          - dO: Gradient of the output tensor w.r.t. the output of the forward pass
+
+        Returns:
+          - dQ: Gradient of the query tensor w.r.t. the loss
+          - dK: Gradient of the key tensor w.r.t. the loss
+          - dV: Gradient of the value tensor w.r.t. the loss
+        """
+        L, Q, K, V, O = ctx.saved_tensors
+        head_dim = Q.shape[-1]
+        scale = 1.0 / math.sqrt(head_dim)
+
+        D = torch.sum(O * dO, dim=-1, keepdim=True)
+
+        S = einsum(Q, K, "... q d, ... k d -> ... q k") * scale
+        P = torch.exp(S - L.unsqueeze(-1))
+
+        dV = einsum(P, dO, "... q k, ... q h -> ... k h")
+        dP = einsum(dO, V, "... q h, ... k h -> ... q k")
+        dS = P * (dP - D)
+        dQ = einsum(dS, K, "... q k, ... k d -> ... q d") * scale
+        dK = einsum(dS, Q, "... q k, ... q d -> ... k d") * scale
+
+        return dQ, dK, dV, None
