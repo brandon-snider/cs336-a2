@@ -725,11 +725,72 @@ See `cs336_systems/ddp_overlap_bucketed.py`
 
 == Problem (`communication_accounting`): 10 points
 
-+ \@TODO
++ Calculations:
 
-+ \@TODO
+  Let $d_"model" = 16384$, $d_"ff" = 53248$, and $N_"blocks" = 126$. Assume FP32 (4 bytes) for static state and BF16 (2 bytes) for activations. Assume batch size $B=128$ and sequence length $L=1024$.
 
-+ \@TODO
+  _Parameters per block:_
+  $
+  P_"block" &= d_"model" times d_"ff" + d_"ff" times d_"model" \
+            &= 16384 times 53248 + 53248 times 16384 = 1,744,830,464
+  $
 
-+ \@TODO
+  _Total parameters:_
+  $ P_"total" = P_"block" times N_"blocks" = 1,744,830,464 times 126 = 219,848,638,464 $
+
+  _Static Memory (FP32):_
+  $ 
+  M_("weights") &= P_"total" times 4 = 879,394,553,856 " bytes" approx 819 " GB" \
+  M_("grads") &= M_("weights") approx 819 " GB" \ 
+  M_("optim") &= M_("weights") times 2 approx 1638 " GB" \
+  M_("static") &= M_("weights") + M_("grads") + M_("optim") approx 819 + 819 + 1638 = 3276 " GB"
+  $
+
+  _Activation Memory (BF16):_
+  $
+  "Samples" &= B times L = 128 times 1024 = 131,072 \
+  "Elements/sample" &= N_"blocks" times (d_"model" + d_"ff") = 126 times (16384 + 53248) = 8,773,632 \
+  "Bytes/sample" &= "Elements/sample" times 2 = 17,547,264 " bytes" approx 16.73 " MB" \
+  M_("act") &= "Bytes/sample" times "Samples" = 17,547,264 times 131,072 \
+            &= 2,300,034,940,928 " bytes" approx 2142 " GB"
+  $
+
+  _Total Memory Required:_
+  $ M_("total") = M_("static") + M_("act") approx 3276 + 2142 = 5418 " GB" $
+
+  _Number of GPUs (assuming batch size $B=128$ and sequence length $L=1024$):_
+  $ N_"GPUs" = ceil(M_("total") / (80 " GB")) = ceil(5418 / 80) = ceil(67.725) = 68 $
+
+  _Number of GPUS (static memory only):_
+  $ N_"GPUs" = ceil(M_("static") / (80 " GB")) = ceil(3276 / 80) = ceil(40.95) = 41 $
+
+  Storing the master weights ($819$ GB), accumulated gradients ($819$ GB), and optimizer states ($1638$ GB) in FP32 requires $3276$ GB, while the BF16 activations saved for backward (assuming $B=128, L=1024$) require $2142$ GB ($16.73$ MB per sample), necessitating $68$ H100 80GB GPUs for the total $5418$ GB.
+
++ Calculations (continuing the assumption that batch size $B=128$ and sequence length $L=1024$):
+
+  Assume FSDP shards static memory ($M_("static") = 3276$ GB) across $n_("fsdp")$ devices. Assume activation checkpointing halves the required activation memory to $M_("act")' = M_("act") / 2 = 2142 / 2 = 1071$ GB, and this is also sharded across $n_("fsdp")$ devices.
+
+  _Memory per device:_
+  $
+  M_("device") &= (M_("static") + M_("act")') / n_("fsdp") \
+              &= (3276 " GB" + 1071 " GB") / n_("fsdp") \
+              &= 4347 " GB" / n_("fsdp")
+  $
+
+  _Required FSDP size ($n_("fsdp")$) for $M_("device") <= 95$ GB:_
+  $
+  M_("device") &<= 95 " GB" \
+  4347 / n_("fsdp") &<= 95 \
+  n_("fsdp") &>= 4347 / 95 \
+  n_("fsdp") &>= 45.757... \
+  n_("fsdp") &= ceil(45.76) = 46
+  $
+
+  Under FSDP, sharding the static memory ($3276$ GB) and halved activation memory ($1071$ GB) requires $n_("fsdp") >= 46$ devices to keep the memory per device ($4347 " GB" / n_("fsdp")$) at or below 95 GB.
+
++ TODO
+
++ TODO
+
++ TODO
 
