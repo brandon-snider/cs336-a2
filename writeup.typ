@@ -257,9 +257,9 @@
     (int, T3)`
 
 
-+ With forward‑pass inference only, the four cublas GEMM kernels (all the `sm90_xmma_gemm_*` kernels) add up to \~36 % of the work.
++ With forward‑pass inference only, the four cublas GEMM kernels (all the `sm90_xmma_gemm_*` kernels) add up to \~36 % of the work.
 
-  During a full training step (forward + backward + AdamW update), those kernels take roughly the same amount of time, but the overall kernel increases significantly because of the many vectorised element‑wise AdamW and reduction kernels (the "vectorized_elementwise_kernel" calls and "reduce_kernel" calls). Consequently, GEMMs now represent only \~19 % of the total. In other words, matrix multiplication's share of runtime is roughly halved, while inexpensive but numerous element‑wise update kernels (mul/add/div/sqrt/fill) and a few extra reductions become the dominant cost.
+  During a full training step (forward + backward + AdamW update), those kernels take roughly the same amount of time, but the overall kernel increases significantly because of the many vectorised element‑wise AdamW and reduction kernels (the "vectorized_elementwise_kernel" calls and "reduce_kernel" calls). Consequently, GEMMs now represent only \~19 % of the total. In other words, matrix multiplication's share of runtime is roughly halved, while inexpensive but numerous element‑wise update kernels (mul/add/div/sqrt/fill) and a few extra reductions become the dominant cost.
 
 + In many cases, the softmax operation takes as long as computing the attention scores and taking the inner products with the value vectors combined (the softmax:matmul ratio within the attention operation varies from \~0.6x to \~1.2x in my experiments).
 
@@ -572,3 +572,40 @@ See `flash_triton.py`
     caption: "Performance Comparison (FP32): PyTorch vs. FlashAttention-2 (Triton)"
   )
 
+= 2.1 Single-Node Distributed Communication in PyTorch
+
+== Problem (`distributed_communication_single_node`): 5 points
+
+See `cs336_systems/benchmark_all_reduce.py`
+
+Single-node all-reduce latency (mean, ms):
+
+#figure(
+  tablem[
+    | *Backend* | *Device* | *Tensor Size (MB)* | *2 Procs*     | *4 Procs*      | *6 Procs*      |
+    |-----------|----------|-------------------|----------------|----------------|----------------|
+    | NCCL      | GPU      | 1                 | 0.04           | 0.05           | 0.05           |
+    | NCCL      | GPU      | 10                | 0.08           | 0.10           | 0.12           |
+    | NCCL      | GPU      | 100               | 0.40           | 0.51           | 0.50           |
+    | NCCL      | GPU      | 1000              | 3.14           | 4.43           | 4.15           |
+    | Gloo      | CPU      | 1                 | 0.57           | 0.76           | 1.33           |
+    | Gloo      | CPU      | 10                | 2.84           | 15.07          | 6.11           |
+    | Gloo      | CPU      | 100               | 42.70          | 58.17          | 64.19          |
+    | Gloo      | CPU      | 1000              | 335.85         | 968.32         | 1037.66        |
+  ],
+  caption: "Single-node all-reduce latency (mean, ms)"
+)
+
+*Commentary:*
+
+NCCL on GPUs is vastly faster than Gloo on CPUs (consistently 10-100x). With both backends, latency grows roughly linearly with tensor size. With NCCL on GPUs, latency grows only very mildly (and not even in all cases) with more ranks. With Gloo on CPUs, latency seems to grow more reliably and more quickly with world size.
+
+= 2.2 A Naïve DDP Implementation
+
+== Problem (`naive_ddp`): 5 points
+
+See `cs336_systems/naive_ddp.py`
+
+== Problem (`naive_ddp_benchmarking`): 3 points
+
+\@TODO — description of benchmarking setup, measured time per training iteration, time spent communicating gradients for each setting
