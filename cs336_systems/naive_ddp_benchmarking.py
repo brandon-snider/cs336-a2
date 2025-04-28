@@ -1,13 +1,19 @@
+from contextlib import nullcontext
 import os
 import argparse
+import timeit
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import numpy as np
+import itertools
 from cs336_basics.model import BasicsTransformerLM as Transformer
 from cs336_basics.nn_utils import cross_entropy
 from cs336_basics.optimizer import AdamW
 from cs336_systems.benchmark import _PRESETS
-from torch import nn
+from cs336_systems.ddp_overlap_individual import DDPIndividualParameters
+
+VOCAB_SIZE = 10000
 
 
 def setup_ddp(rank: int, world_size: int, backend: str = "nccl") -> str:
@@ -35,21 +41,30 @@ def cleanup_ddp() -> None:
     dist.destroy_process_group()
 
 
-class ToyModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(nn.Linear(32, 128), nn.ReLU(), nn.Linear(128, 10))
-
-    def forward(self, x):
-        return self.net(x)
-
-
 # Training loop
-def run(rank: int, world_size: int, warmup: int = 5, steps: int = 20, batch_size: int = 32, backend: str = "nccl"):
-    print(f"Running DDP with rank {rank} and world size {world_size} and backend {backend}")
+def run(
+    rank: int,
+    world_size: int,
+    warmup: int = 5,
+    steps: int = 5,
+    batch_size: int = 32,
+    seq_len: int = 256,
+    backend: str = "nccl",
+    mixed_precision: bool = False,
+    jit: bool = False,
+    flat: bool = False,
+    overlap_individual: bool = False,
+):
+    print(
+        f"Running DDP with rank {rank}, world size {world_size}, batch size {batch_size}, seq len {seq_len}, and backend {backend}"
+    )
 
     device = setup_ddp(rank, world_size, backend)
     dist.barrier()
+
+    def _sync() -> None:
+        if device.startswith("cuda"):
+            torch.cuda.synchronize(device=device)
 
     assert batch_size % world_size == 0, "Batch size must be divisible by world size"
     local_batch_size = batch_size // world_size
@@ -57,77 +72,118 @@ def run(rank: int, world_size: int, warmup: int = 5, steps: int = 20, batch_size
     preset = _PRESETS["xl"]
     model = Transformer(
         vocab_size=10000,
-        context_length=256,
-        d_model=preset.d_model,
-        num_layers=preset.num_layers,
-        num_heads=preset.num_heads,
-        d_ff=preset.d_ff,
+        context_length=seq_len,
+        d_model=preset["d_model"],
+        num_layers=preset["num_layers"],
+        num_heads=preset["num_heads"],
+        d_ff=preset["d_ff"],
     ).to(device)
+
+    if jit:
+        model = torch.compile(model)
+
+    if overlap_individual:
+        model = DDPIndividualParameters(model)
+
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Number of parameters: {n_params}")
+
     optim = AdamW(model.parameters(), lr=1e-3)
     loss_fn = cross_entropy
 
-    # Broadcast initial parameters so all ranks start identically
-    for p in model.parameters():
-        dist.broadcast(p.data, src=0)
+    if not overlap_individual:
+        # Broadcast initial parameters so all ranks start identically
+        for p in model.parameters():
+            dist.broadcast(p.data, src=0)
 
-    # # Baseline setup for rank 0
-    # baseline_model = None
-    # baseline_optim = None
-    # if rank == 0:
-    #     baseline_model = ToyModel().to(device)
-    #     # Ensure baseline starts with identical parameters as the DDP model after broadcast
-    #     baseline_model.load_state_dict(model.state_dict())
-    #     baseline_optim = torch.optim.SGD(baseline_model.parameters(), lr=1e-2)
+    times_total = []
+    times_comm = []
 
-    for step in range(steps):
-        # Deterministic Data Generation
-        data_seed = step
-        torch.manual_seed(data_seed)
-        all_x = torch.randn(batch_size, 32, device=device)
-        all_y = torch.randint(0, 10, (batch_size,), device=device)
+    device_type = "cuda" if device.startswith("cuda") else "cpu"
 
-        # Restore rank-specific seed if other random operations depended on it
-        # torch.manual_seed(rank * steps + step)
+    ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if mixed_precision else nullcontext()
 
-        # DDP Training Step with partition for the current rank
-        start_idx = rank * local_batch_size
-        end_idx = start_idx + local_batch_size
-        x = all_x[start_idx:end_idx]
-        y = all_y[start_idx:end_idx]
+    for i in range(warmup + steps):
+        x = torch.randint(0, VOCAB_SIZE, (local_batch_size, seq_len), device=device)
+        y = torch.randint(0, VOCAB_SIZE, (local_batch_size, seq_len), device=device)
+
+        _sync()
+        tt0 = timeit.default_timer()
 
         optim.zero_grad(set_to_none=True)
-        logits = model(x)
-        loss = loss_fn(logits, y)
+        with ctx:
+            logits = model(x)
+            loss = loss_fn(logits, y)
         loss.backward()
 
-        # Naive gradient averaging: one all‑reduce per parameter
-        for p in model.parameters():
-            if p.grad is not None:
-                dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
-                p.grad.mul_(1.0 / world_size)
+        if not overlap_individual:
+            _sync()
+            tc0 = timeit.default_timer()
+
+            if flat:
+                params_with_grads = [p for p in model.parameters() if p.grad is not None]
+                if not params_with_grads:
+                    continue
+
+                grads = [p.grad for p in params_with_grads]
+                flattened_grads = torch._utils._flatten_dense_tensors(grads)
+
+                dist.all_reduce(flattened_grads, op=dist.ReduceOp.SUM)
+
+                flattened_grads.mul_(1.0 / world_size)
+                updated_grads = torch._utils._unflatten_dense_tensors(flattened_grads, grads)
+
+                for p, updated_grad in zip(params_with_grads, updated_grads):
+                    p.grad = updated_grad
+            else:
+                # Naive gradient averaging: one all‑reduce per parameter
+                for p in model.parameters():
+                    if p.grad is not None:
+                        dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+                        p.grad.mul_(1.0 / world_size)
+
+            _sync()
+            tc1 = timeit.default_timer()
+        else:
+            tc1 = 0
+            tc0 = 0
+
+        if overlap_individual:
+            model.finish_gradient_synchronization()
 
         optim.step()
 
-        # # Baseline Training Step on rank 0 only
-        # if rank == 0:
-        #     baseline_optim.zero_grad(set_to_none=True)
-        #     baseline_logits = baseline_model(all_x)  # Use full batch
-        #     baseline_loss = loss_fn(baseline_logits, all_y)
-        #     baseline_loss.backward()
-        #     baseline_optim.step()
+        _sync()
+        tt1 = timeit.default_timer()
 
-        if device.startswith("cuda"):
-            torch.cuda.synchronize(device=device)
+        if i >= warmup:
+            times_total.append(tt1 - tt0)
+            times_comm.append(tc1 - tc0)
 
-    # # Verification vs single-process baseline on rank 0
-    # if rank == 0:
-    #     print("Rank 0: Verifying DDP model parameters against single-process baseline...")
-    #     for (name, param), (base_name, base_param) in zip(model.named_parameters(), baseline_model.named_parameters()):
-    #         assert name == base_name
-    #         assert torch.allclose(param.data, base_param.data), (
-    #             f"Mismatch found in parameter: {name}. Max diff: {torch.abs(param.data - base_param.data).max().item()}"
-    #         )
-    #     print("Rank 0: Verification successful! DDP parameters match baseline.")
+    # Gather timings
+    gathered_totals: list[list[float]] | None = [None] * world_size if rank == 0 else None
+    gathered_comms: list[list[float]] | None = [None] * world_size if rank == 0 else None
+    dist.gather_object(times_total, gathered_totals, dst=0)
+    dist.gather_object(times_comm, gathered_comms, dst=0)
+
+    # On rank 0, print results
+    if rank == 0:
+        # Flatten lists and convert to numpy arrays
+        all_totals = np.array(list(itertools.chain.from_iterable(gathered_totals)))
+        all_comms = np.array(list(itertools.chain.from_iterable(gathered_comms)))
+
+        # Calculate statistics (convert to ms)
+        total_mean_ms = np.mean(all_totals) * 1000
+        total_std_ms = np.std(all_totals) * 1000
+        comm_mean_ms = np.mean(all_comms) * 1000
+        comm_std_ms = np.std(all_comms) * 1000
+        comm_proportion = comm_mean_ms / total_mean_ms if total_mean_ms > 0 else 0
+
+        print(f"--- Results for Batch Size: {batch_size}, Seq Len: {seq_len} ---")
+        print(f"Avg total time / step : {total_mean_ms:.2f} ± {total_std_ms:.2f} ms")
+        print(f"Avg comm time / step  : {comm_mean_ms:.2f} ± {comm_std_ms:.2f} ms")
+        print(f"Comm proportion       : {comm_proportion:.2%}")
+        print("-" * 50)
 
     cleanup_ddp()
 
@@ -136,18 +192,43 @@ def _parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--world-size", type=int, default=2)
     parser.add_argument("--warmup", type=int, default=5)
-    parser.add_argument("--steps", type=int, default=20)
-    parser.add_argument("--batch-sizes", type=int, nargs="+", default=[32])
+    parser.add_argument("--steps", type=int, default=5)
+    parser.add_argument("--batch-sizes", type=int, nargs="+", default=[2, 4, 8, 16, 32])
+    parser.add_argument("--seq-lens", type=int, nargs="+", default=[128])
     parser.add_argument("--backend", type=str, default=None)
+    parser.add_argument("--mixed-precision", action="store_true")
+    parser.add_argument("--jit", action="store_true")
+    parser.add_argument("--tf32", action="store_true")
+    parser.add_argument("--flat", action="store_true")
+    parser.add_argument("--overlap-individual", action="store_true")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
     WORLD_SIZE = args.world_size
-    # Ensure batch size is divisible by world size before spawning processes
-    assert args.batch_size % WORLD_SIZE == 0, (
-        f"Batch size ({args.batch_size}) must be divisible by world size ({WORLD_SIZE})"
-    )
     BACKEND = args.backend or "nccl" if torch.cuda.is_available() else "gloo"
-    mp.spawn(run, args=(WORLD_SIZE, args.warmup, args.steps, args.batch_size, BACKEND), nprocs=WORLD_SIZE, join=True)
+
+    if args.tf32:
+        torch.set_float32_matmul_precision("high")
+
+    for batch_size, seq_len in itertools.product(args.batch_sizes, args.seq_lens):
+        assert batch_size % WORLD_SIZE == 0, f"Batch size ({batch_size}) must be divisible by world size ({WORLD_SIZE})"
+
+        mp.spawn(
+            run,
+            args=(
+                WORLD_SIZE,
+                args.warmup,
+                args.steps,
+                batch_size,
+                seq_len,
+                BACKEND,
+                args.mixed_precision,
+                args.jit,
+                args.flat,
+                args.overlap_individual,
+            ),
+            nprocs=WORLD_SIZE,
+            join=True,
+        )

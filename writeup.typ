@@ -514,10 +514,10 @@ See `flash_triton.py`
       | 32768 |        32 |    14.971 | 31.125   | 46.180   |       0.965 |      10.215 |      11.141 | 15.5×   | 3.0×    | 4.1×    |
       | 32768 |        64 |    15.019 | 31.069   | 46.147   |       1.048 |      10.423 |      11.341 | 14.3×   | 3.0×    | 4.1×    |
       | 32768 |       128 |    15.054 | 31.113   | 46.263   |       2.241 |      10.29  |      12.553 | 6.7×    | 3.0×    | 3.7×    |
-      | 65536 |        16 |    59.954 | 124.306  | 184.130  |       3.102 |      41.357 |      44.1   | 19.3×   | 3.0×    | 4.2×    |
-      | 65536 |        32 |    59.982 | 124.183  | 184.058  |       3.591 |      41.246 |      44.097 | 16.7×   | 3.0×    | 4.2×    |
-      | 65536 |        64 |    60.204 | 124.908  | 185.229  |       4.038 |      41.751 |      44.917 | 14.9×   | 3.0×    | 4.1×    |
-      | 65536 |       128 |    60.603 | 126.154  | 186.594  |       8.884 |      42.45  |      50.692 | 6.8×    | 3.0×    | 3.7×    |
+      | 65536 |        16 |    59.954 | 124.306  | 184.130  |       4.463 |      67.858 |      72.805 | 22.1×   | N/A     | N/A     |
+      | 65536 |        32 |    59.982 | 124.183  | 184.058  |       6.553 |      73.431 |      79.919 | 15.4×   | N/A     | N/A     |
+      | 65536 |        64 |    60.204 | 124.908  | 185.229  |       4.038 |      41.751 |      44.917 | 14.9×   | N/A     | N/A     |
+      | 65536 |       128 |    60.603 | 126.154  | 186.594  |       8.884 |      42.45  |      50.692 | 6.8×    | N/A     | N/A     |
     ],
     caption: "Performance Comparison (BF16): PyTorch vs. FlashAttention-2 (Triton)"
   )
@@ -608,4 +608,93 @@ See `cs336_systems/naive_ddp.py`
 
 == Problem (`naive_ddp_benchmarking`): 3 points
 
-\@TODO — description of benchmarking setup, measured time per training iteration, time spent communicating gradients for each setting
+See `cs336_systems/naive_ddp_benchmarking.py`
+
+In the benchmarking script, I collect measurements for global batch sizes [2, 4, 8, 16, 32] and a sequence length of 128, measuring total time for a single training step and the time spent in communication in each case. As expected, the results show that communication time for gradients is independent of batch size, total time is roughly linear in batch size.
+
+The script includes 5 warmup steps and 5 measurement steps on each rank. Each device synchronizes before each measurement. The results are collected in a list on each rank. The lists are gathered and flattened on rank 0, which averages the results and reports the mean and standard deviation of the measurements.
+
+All training was done in float32 without JIT-compilation. With mixed precision training and JIT compilation, I would expect compute time to come down significantly, exacerbating the communication overhead.
+
+The results are as follows (all times in milliseconds):
+
+#figure(
+  tablem[
+    | *Batch Size* | *Total Time ($mu plus.minus sigma$)* | *Comm Time ($mu plus.minus sigma$)* | *Comm Prop.* |
+    |--------------|-----------------------------------|-----------------------------------|--------------|
+    | 2            | 286.09 ± 1.78 ms                  | 43.03 ± 1.31 ms                   | 15.04%       |
+    | 4            | 309.61 ± 1.85 ms                  | 42.44 ± 1.03 ms                   | 13.71%       |
+    | 8            | 366.11 ± 1.89 ms                  | 42.73 ± 1.84 ms                   | 11.67%       |
+    | 16           | 531.74 ± 0.60 ms                  | 42.76 ± 0.97 ms                   | 8.04%        |
+    | 32           | 827.26 ± 0.56 ms                  | 42.57 ± 0.59 ms                   | 5.15%        |
+  ],
+  caption: "Naive DDP Benchmark Results (XL Model, 2 GPUs, Seq Len=128)"
+)
+
+= 2.3 Improving Upon the Minimal DDP Implementation
+
+== Problem (`minimal_ddp_flat_benchmarking`): 2 points
+
+Results when training the XL model in float32 on 2 GPUs with a sequence length of 128 and batch size of 16:
+
+*Single batched all-reduce call:*
+
+Avg total time / step : 523.03 ± 0.25 ms \
+Avg communication time / step  : 36.01 ± 0.62 ms \
+Communication proportion       : 6.89%
+
+*Individually communicating gradients:*
+
+Avg total time / step : 531.74 ± 0.60 ms \
+Avg comm time / step  : 42.76 ± 0.97 ms \
+Comm proportion       : 8.04%
+
+As expected, the single batched all-reduce call is faster than individually communicating gradients, and I would expect the benefit to increase with larger world sizes. However, there is still significant communication overhead, which cannot easily be mitigated without overlapping communication with computation.
+
+== Problem (`ddp_overlap_individual_parameters`): 5 points
+
+See `cs336_systems/ddp_overlap.py`
+
+== Problem (`ddp_overlap_individual_parameters_benchmarking`): 1 point
+
++ Total time per training iteration (batch size 16, seq len 128, mean over 5 iterations after 5 warmup iterations, all times in milliseconds):
+
+  #figure(
+    tablem[
+      | *DDP Implementation*    | *Total Time ($mu plus.minus sigma$)* |
+      |-------------------------|--------------------------------------|
+      | Naive DDP               | 531.74 ± 0.60 ms                     |
+      | Flat DDP                | 523.03 ± 0.25 ms                     |
+      | Overlap-individual DDP  | 509.30 ± 0.64 ms                     |
+    ],
+    caption: "Performance comparison of DDP implementations"
+  )
+
+  The implementation that overlaps communication with computation improves significantly over both the naive (one all-reduce per parameter) and flat (one all-reduce for all parameters) implementations.
+
+  The naive implementation used 42.76ms for communication, on average. We can then estimate that the time per training step not if communication overhead could be completely eliminated would be $531.74 - 42.76 approx 489 "ms"$. The overlap-individual implementation used 509.30ms per training step, suggesting $approx 20 "ms"$ of communication overhead — an improvement of \~53% over naive DDP, and of \~44% over flat DDP.
+
++ \@TODO use Nsight to compare traces visually, include screenshots showing that one overlaps communication with computation and the other does not
+
+== Problem (`ddp_overlap_bucketed`): 8 points
+
+See `cs336_systems/ddp_overlap_bucketed.py`
+
+== Problem (`ddp_bucketed_benchmarking`): 3 points
+
++ \@TODO — benchmarks with varying bucket sizes (possibly using PyTorch profiler), 3-4 sentence commentary on expectations, reality, and possible reasons for any mismatch
+
++ \@TODO — Equation that models DDP overhead and an equation for optimal bucket size
+
+= 2.4 4D Parallelism
+
+== Problem (`communication_accounting`): 10 points
+
++ \@TODO
+
++ \@TODO
+
++ \@TODO
+
++ \@TODO
+
