@@ -682,9 +682,44 @@ See `cs336_systems/ddp_overlap_bucketed.py`
 
 == Problem (`ddp_bucketed_benchmarking`): 3 points
 
-+ \@TODO — benchmarks with varying bucket sizes (possibly using PyTorch profiler), 3-4 sentence commentary on expectations, reality, and possible reasons for any mismatch
++ Mean total time per training step for the XL model (batch size 16, seq len 128) with varying bucket sizes:
 
-+ \@TODO — Equation that models DDP overhead and an equation for optimal bucket size
+  #figure(
+    tablem[
+      | *Bucket Size (MB)* | *Total Time ($mu plus.minus sigma$)* |
+      |--------------------|--------------------------------------|
+      | 1               | 510.98 ± 0.33 ms                     |
+      | 10              | 509.02 ± 0.19 ms                     |
+      | 100             | 516.44 ± 0.29 ms                     |
+      | 1000            | 512.88 ± 0.34 ms                     |
+    ],
+    caption: "DDP Overlap Bucketed Performance (XL Model, 2 GPUs, B=16, L=128)"
+  )
+
+  On two H100s, the all-reduce of an entire 8 GB gradient tensor finishes in a small fraction of the time taken by the backward pass of the XL model. Because we build buckets in reverse parameter order, the gradients for the deepest layers are transmitted first and overlap with compute for shallower layers. The only communication that shows up significantly in step time is the "tail" of the final bucket. This is why bucket size makes very little difference in this experimental setup, except that in this specific setup the 100 MB bucket size happens to leave a large bucket outstanding when the backward pass computation completes.
+  
+  If we increased the world-size or moved to a slower interconnect (e.g. PCIe), the hidden-under-compute advantage would diminish and the expected trend of "larger bucket → fewer launches → faster" would appear.
+
++ Let:
+
+  $s$ be the total bytes of parameters (i.e. total bytes of gradients to move at each step)\
+  $w$ be the all-redue algorithm bandwidth\
+  $o$ be the overhead associated with each communication call\
+  $n_b$ be the number of buckets
+
+  After assuming that the time to compute gradients for a bucket is equal to the time to commuicate gradients for the bucket, all reductions except the very last one will overlap with compute. What remains is:
+
+  $ T_"over" = (s "/" n_b) / w + n_b o = s / (n_b w) + n_b o $
+
+  This is the data transfer time for the final bucket, plus the overhead for all the communication calls.
+
+  To minimize $T_"over"$:
+
+  $ (d T_"over") / (d n_b) = -s / (n_b^2 w) + o = 0 => n^*_b = sqrt(s / (o w)) $
+
+  Then, with equal-sizes buckets, the optimal bucket size is:
+
+  $ B^* = s / (n^*_b) = sqrt(s w o) quad ("bytes") $
 
 = 2.4 4D Parallelism
 

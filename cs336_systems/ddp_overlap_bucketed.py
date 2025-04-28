@@ -69,6 +69,8 @@ class DDPBucketedParameters(nn.Module):
         if this_bucket.num_params > 0:
             self.buckets.append(this_bucket)
 
+        print(f"\nUsing {len(self.buckets)} buckets")
+
     def _register_hooks(self):
         """Register post-accumulate gradient hook for each parameter"""
 

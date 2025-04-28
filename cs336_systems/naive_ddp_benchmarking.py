@@ -11,6 +11,7 @@ from cs336_basics.model import BasicsTransformerLM as Transformer
 from cs336_basics.nn_utils import cross_entropy
 from cs336_basics.optimizer import AdamW
 from cs336_systems.benchmark import _PRESETS
+from cs336_systems.ddp_overlap_bucketed import DDPBucketedParameters
 from cs336_systems.ddp_overlap_individual import DDPIndividualParameters
 
 VOCAB_SIZE = 10000
@@ -54,6 +55,8 @@ def run(
     jit: bool = False,
     flat: bool = False,
     overlap_individual: bool = False,
+    overlap_bucketed: bool = False,
+    bucket_size_mb: float = 100,
 ):
     print(
         f"Running DDP with rank {rank}, world size {world_size}, batch size {batch_size}, seq len {seq_len}, and backend {backend}"
@@ -82,8 +85,12 @@ def run(
     if jit:
         model = torch.compile(model)
 
+    overlap = True if overlap_individual or overlap_bucketed else False
+
     if overlap_individual:
         model = DDPIndividualParameters(model)
+    elif overlap_bucketed:
+        model = DDPBucketedParameters(model, bucket_size_mb=bucket_size_mb)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters: {n_params}")
@@ -91,7 +98,7 @@ def run(
     optim = AdamW(model.parameters(), lr=1e-3)
     loss_fn = cross_entropy
 
-    if not overlap_individual:
+    if not overlap:
         # Broadcast initial parameters so all ranks start identically
         for p in model.parameters():
             dist.broadcast(p.data, src=0)
@@ -116,7 +123,7 @@ def run(
             loss = loss_fn(logits, y)
         loss.backward()
 
-        if not overlap_individual:
+        if not overlap:
             _sync()
             tc0 = timeit.default_timer()
 
@@ -148,7 +155,7 @@ def run(
             tc1 = 0
             tc0 = 0
 
-        if overlap_individual:
+        if overlap:
             model.finish_gradient_synchronization()
 
         optim.step()
@@ -179,10 +186,18 @@ def run(
         comm_std_ms = np.std(all_comms) * 1000
         comm_proportion = comm_mean_ms / total_mean_ms if total_mean_ms > 0 else 0
 
-        print(f"--- Results for Batch Size: {batch_size}, Seq Len: {seq_len} ---")
+        print(
+            f"--- Results for Batch Size: {batch_size}, Seq Len: {seq_len}, Backend: {backend}, Warmup: {warmup}, Steps: {steps} ---"
+        )
+        print(
+            f"--- Using: {'JIT, ' if jit else ''}{'Mixed Precision, ' if mixed_precision else ''}{'Flat, ' if flat else ''}{'Overlap Individual, ' if overlap_individual else ''}{'Overlap Bucketed with bucket size: ' + str(bucket_size_mb) + ' MB' if overlap_bucketed else ''} ---"
+        )
+
         print(f"Avg total time / step : {total_mean_ms:.2f} ± {total_std_ms:.2f} ms")
-        print(f"Avg comm time / step  : {comm_mean_ms:.2f} ± {comm_std_ms:.2f} ms")
-        print(f"Comm proportion       : {comm_proportion:.2%}")
+
+        if not overlap:
+            print(f"Avg comm time / step  : {comm_mean_ms:.2f} ± {comm_std_ms:.2f} ms")
+            print(f"Comm proportion       : {comm_proportion:.2%}")
         print("-" * 50)
 
     cleanup_ddp()
@@ -201,6 +216,8 @@ def _parse_args():
     parser.add_argument("--tf32", action="store_true")
     parser.add_argument("--flat", action="store_true")
     parser.add_argument("--overlap-individual", action="store_true")
+    parser.add_argument("--overlap-bucketed", action="store_true")
+    parser.add_argument("--bucket-sizes-mb", type=float, nargs="+", default=[100])
     return parser.parse_args()
 
 
@@ -212,23 +229,28 @@ if __name__ == "__main__":
     if args.tf32:
         torch.set_float32_matmul_precision("high")
 
-    for batch_size, seq_len in itertools.product(args.batch_sizes, args.seq_lens):
-        assert batch_size % WORLD_SIZE == 0, f"Batch size ({batch_size}) must be divisible by world size ({WORLD_SIZE})"
+    for bucket_size_mb in args.bucket_sizes_mb:
+        for batch_size, seq_len in itertools.product(args.batch_sizes, args.seq_lens):
+            assert batch_size % WORLD_SIZE == 0, (
+                f"Batch size ({batch_size}) must be divisible by world size ({WORLD_SIZE})"
+            )
 
-        mp.spawn(
-            run,
-            args=(
-                WORLD_SIZE,
-                args.warmup,
-                args.steps,
-                batch_size,
-                seq_len,
-                BACKEND,
-                args.mixed_precision,
-                args.jit,
-                args.flat,
-                args.overlap_individual,
-            ),
-            nprocs=WORLD_SIZE,
-            join=True,
-        )
+            mp.spawn(
+                run,
+                args=(
+                    WORLD_SIZE,
+                    args.warmup,
+                    args.steps,
+                    batch_size,
+                    seq_len,
+                    BACKEND,
+                    args.mixed_precision,
+                    args.jit,
+                    args.flat,
+                    args.overlap_individual,
+                    args.overlap_bucketed,
+                    bucket_size_mb,
+                ),
+                nprocs=WORLD_SIZE,
+                join=True,
+            )
