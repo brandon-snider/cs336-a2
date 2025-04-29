@@ -788,9 +788,20 @@ See `cs336_systems/ddp_overlap_bucketed.py`
 
   Under FSDP, sharding the static memory ($3276$ GB) and halved activation memory ($1071$ GB) requires $n_("fsdp") >= 46$ devices to keep the memory per device ($4347 " GB" / n_("fsdp")$) at or below 95 GB.
 
-+ TODO
++ \@TODO — Scaling Book — at what per-device batch size is the model compute bound, and what is overall batch size in this setting?
 
-+ TODO
++ \@TODO — one-paragraph backed up response on how to reduce batch size but retain high throughput
 
-+ TODO
+= 3 Optimizer State Sharding
 
+== Problem (`optimizer_state_sharding`): 10 points
+
+See `cs336_systems/optimizer_state_sharding.py`
+
+== Problem (`optimizer_state_sharding_accounting`): 5 points
+
++ \@TODO — profile memory usage with and without sharding, report it, and break down how memory is divided between different model and optimizer components
+
++ \@TODO — measure time per iteration with and without, report timings, comment on them
+
++ \@TODO — explain how out implementation differs from ZeRO-1, especially i.t.o memory and communication volume
