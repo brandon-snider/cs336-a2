@@ -24,6 +24,7 @@
   figure-index: (enabled: true),
   table-index: (enabled: true),
   listing-index: (enabled: true),
+  bibliography: bibliography("refs.bib")
 )
 
 #set enum(numbering: "a)")
@@ -800,9 +801,42 @@ See `cs336_systems/ddp_overlap_bucketed.py`
 
   Under FSDP with activation checkpointing, sharding the static memory ($3276$ GB) and halved activation memory ($1071$ GB for B=128, L=1024) across devices requires $N_("fsdp") >= 46$ devices to keep the memory per device ($4347 " GB" / N_("fsdp")$) at or below 95 GB.
 
-+ \@TODO — Scaling Book — at what per-device batch size is the model compute bound, and what is overall batch size in this setting?
++ Calculations:
 
-+ \@TODO — one-paragraph backed up response on how to reduce batch size but retain high throughput
+  #figure(
+    three-line-table(
+      columns: (auto, auto, auto),
+      align: (left, right, left),[
+      | *quantity*              | *value*                                                                                | *note*           |
+      |-------------------------|----------------------------------------------------------------------------------------|------------------|
+      | Total chips             | $N = X Y = 16 times 4 = 64$                                                            | given            |
+      | Mesh factors            | $M_X = 2, M_Y = 1$                                                                     | given            |
+      | FFN width               | $F = d_"ff" = 53248$                                                                   | given            |
+      | Compute rate            | $C = 4.6 times 10^14 " FLOP s"^-1$                                                     | given            |
+      | Bandwidth               | $W_"ici" = 1.8 times 10^11 " byte s"^-1$                                               | given            |
+      | ICI arithmetic intensity | $alpha = C / W_"ici" = (4.6 times 10^14) / (1.8 times 10^11) approx 2.555 times 10^3$ | TPU Scaling Book                 |
+      ]),
+    caption: "Compute-Bound Calculation Inputs (TPU v5p)"
+  )
+
+  According to the section on mixed FDSP + TP from the TPU Scaling Book, the compute-bound inequality for mixed FSDP + TP is $ B / N > (4 alpha^2) / (M_X M_Y F) $.
+
+  Computing the right-hand side:
+  $ (4 alpha^2) / (M_X M_Y F) = (4 (2.555 times 10^3)^2) / (2 times 1 times 53248) approx 2.46 times 10^2 " tokens" $
+
+  Hence:
+  - Minimum per-device batch size: $ (B/N)_"min" approx 2.46 times 10^2 $ tokens.
+  - Corresponding global batch size: $ B_"min" = (B/N)_"min" times N approx 2.46 times 10^2 times 64 approx 1.58 times 10^4 $.
+
+  _One-sentence answer:_ For the specified $X=16, Y=4$ layout on TPU v5p, the model stays compute-bound only when each chip processes $approx 2.46 times 10^2$ tokens (global batch $approx 1.58 times 10^4$), or more per forward pass.
+
++ Per the Ultrascale Playbook #cite(<ultrascale_playbook>), our global batch size is $"gbs" = "mbs" times "grad_add" times "dp"$, where $"mbs"$ is the micro batch size, $"grad_add"$ is the gradient accumulation steps, and $"dp"$ is the data parallelism factor.
+
+  We can then reduce our global batch size by (i) reducing our micro-batch size (ii) taking fewer gradient accumulation steps (iii) reducing our data parallelism factor.
+
+  To reduce our global batch size while maximizing throughput, we don't want to simply reduce our micro-batch size with no other changes. Instead, we may want to reduce our micro-batch size and, for example, reduce activation checkpointing, using the memory we get from the smaller batch size to store more activations and get higher throughput than we otherwise would at the smaller micro-batch size.
+
+  We can also reduce our data parallelism factor in favor of other forms of parallelism, such as pipeline parallelism, in which we partition the  model along the depth dimension (i.e. different devices handle different layers). Then, to prevent idle time caused by the dependency of each device on the output of the previous layer (computed on a different device), we can use an algorithm like DualPipe #cite(<dsv3_report>), introduced in the DeepSeek-V3 technical report, which both overlaps forward and backward communication-computation phases and reduces pipeline bubbles.
 
 = 3 Optimizer State Sharding
 
