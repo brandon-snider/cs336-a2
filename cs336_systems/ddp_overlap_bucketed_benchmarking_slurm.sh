@@ -9,4 +9,4 @@
 #SBATCH --output=ddp_overlap_bucketed_benchmarking_%j.out
 #SBATCH --error=ddp_overlap_bucketed_benchmarking_%j.err
 
-uv run -m cs336_systems.naive_ddp_benchmarking --overlap-bucketed --bucket-sizes-mb 1000 100 10 1 --batch-sizes 16 --seq-lens 128
+uv run -m cs336_systems.ddp_benchmarking --overlap-bucketed --bucket-sizes-mb 1000 100 10 1 --batch-sizes 16 --seq-lens 128

@@ -608,7 +608,7 @@ See `cs336_systems/naive_ddp.py`
 
 == Problem (`naive_ddp_benchmarking`): 3 points
 
-See `cs336_systems/naive_ddp_benchmarking.py`
+See `cs336_systems/ddp_benchmarking.py`
 
 In the benchmarking script, I collect measurements for global batch sizes [2, 4, 8, 16, 32] and a sequence length of 128, measuring total time for a single training step and the time spent in communication in each case. As expected, the results show that communication time for gradients is independent of batch size, total time is roughly linear in batch size.
 
@@ -802,6 +802,18 @@ See `cs336_systems/optimizer_state_sharding.py`
 
 + \@TODO — profile memory usage with and without sharding, report it, and break down how memory is divided between different model and optimizer components
 
-+ \@TODO — measure time per iteration with and without, report timings, comment on them
++ *Mean total time per training step* for the XL model on 2 GPUs, using naive DDP (one all-reduce per parameter tensor) and a sequence length of 128:
+
+  #figure(
+    tablem[
+      | *Batch Size* | *Sharded ($mu$, ms)* | *Unsharded ($mu$, ms)* |
+      |--------------|---------------------|-----------------------|
+      | 16           | 510.53              | 527.62                |
+      | 32           | 804.91              | 822.41                |
+    ],
+    caption: "Optimizer State Sharding Performance (XL, 2 GPUs, Naive DDP, Seq Len=128)"
+  )
+
+  Optimizer state sharding provides a modest speedup over the unsharded implementation with this setup. As expected, the gain from sharding is more pronounced with smaller batch sizes, where the optimizer step represents a larger fraction of total training time. This gain comes from the reduction in both HBM traffic and the number of elementwise operations in the optimizer step, since the optimizer on each rank is only responsible for tracking states and performing updates for its local subset of parameters.
 
 + \@TODO — explain how out implementation differs from ZeRO-1, especially i.t.o memory and communication volume

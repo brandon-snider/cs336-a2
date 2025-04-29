@@ -9,4 +9,4 @@
 #SBATCH --output=naive_ddp_benchmarking_%j.out
 #SBATCH --error=naive_ddp_benchmarking_%j.err
 
-uv run -m cs336_systems.naive_ddp_benchmarking --batch-sizes 2 4 8 16 32 --seq-lens 128
+uv run -m cs336_systems.ddp_benchmarking --batch-sizes 2 4 8 16 32 --seq-lens 128

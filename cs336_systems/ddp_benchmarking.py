@@ -13,6 +13,7 @@ from cs336_basics.optimizer import AdamW
 from cs336_systems.benchmark import _PRESETS
 from cs336_systems.ddp_overlap_bucketed import DDPBucketedParameters
 from cs336_systems.ddp_overlap_individual import DDPIndividualParameters
+from cs336_systems.optimizer_state_sharding import ShardedOptimizer
 
 VOCAB_SIZE = 10000
 
@@ -57,6 +58,7 @@ def run(
     overlap_individual: bool = False,
     overlap_bucketed: bool = False,
     bucket_size_mb: float = 100,
+    shard_optimizer: bool = False,
 ):
     print(
         f"Running DDP with rank {rank}, world size {world_size}, batch size {batch_size}, seq len {seq_len}, and backend {backend}"
@@ -95,7 +97,10 @@ def run(
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters: {n_params}")
 
-    optim = AdamW(model.parameters(), lr=1e-3)
+    if shard_optimizer:
+        optim = ShardedOptimizer(model.parameters(), AdamW, lr=1e-3)
+    else:
+        optim = AdamW(model.parameters(), lr=1e-3)
     loss_fn = cross_entropy
 
     if not overlap:
@@ -190,7 +195,7 @@ def run(
             f"--- Results for Batch Size: {batch_size}, Seq Len: {seq_len}, Backend: {backend}, Warmup: {warmup}, Steps: {steps} ---"
         )
         print(
-            f"--- Using: {'JIT, ' if jit else ''}{'Mixed Precision, ' if mixed_precision else ''}{'Flat, ' if flat else ''}{'Overlap Individual, ' if overlap_individual else ''}{'Overlap Bucketed with bucket size: ' + str(bucket_size_mb) + ' MB' if overlap_bucketed else ''} ---"
+            f"--- Using: {'JIT, ' if jit else ''}{'Mixed Precision, ' if mixed_precision else ''}{'Flat, ' if flat else ''}{'Overlap Individual, ' if overlap_individual else ''}{'Overlap Bucketed with bucket size: ' + str(bucket_size_mb) + ' MB, ' if overlap_bucketed else ''}{'Sharded Optimizer' if shard_optimizer else ''} ---"
         )
 
         print(f"Avg total time / step : {total_mean_ms:.2f} ± {total_std_ms:.2f} ms")
@@ -218,6 +223,7 @@ def _parse_args():
     parser.add_argument("--overlap-individual", action="store_true")
     parser.add_argument("--overlap-bucketed", action="store_true")
     parser.add_argument("--bucket-sizes-mb", type=float, nargs="+", default=[100])
+    parser.add_argument("--shard-optimizer", action="store_true")
     return parser.parse_args()
 
 
@@ -250,6 +256,7 @@ if __name__ == "__main__":
                     args.overlap_individual,
                     args.overlap_bucketed,
                     bucket_size_mb,
+                    args.shard_optimizer,
                 ),
                 nprocs=WORLD_SIZE,
                 join=True,
