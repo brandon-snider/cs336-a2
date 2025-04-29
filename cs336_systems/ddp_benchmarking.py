@@ -59,6 +59,7 @@ def run(
     overlap_bucketed: bool = False,
     bucket_size_mb: float = 100,
     shard_optimizer: bool = False,
+    report_memory: bool = False,
 ):
     print(
         f"Running DDP with rank {rank}, world size {world_size}, batch size {batch_size}, seq len {seq_len}, and backend {backend}"
@@ -73,6 +74,9 @@ def run(
 
     assert batch_size % world_size == 0, "Batch size must be divisible by world size"
     local_batch_size = batch_size // world_size
+
+    # Reset peak memory stats before any allocation on this rank
+    torch.cuda.reset_peak_memory_stats()
 
     preset = _PRESETS["xl"]
     model = Transformer(
@@ -94,6 +98,10 @@ def run(
     elif overlap_bucketed:
         model = DDPBucketedParameters(model, bucket_size_mb=bucket_size_mb)
 
+    # Measure peak memory after model initialization
+    mem_after_init = torch.cuda.max_memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters: {n_params}")
 
@@ -101,6 +109,7 @@ def run(
         optim = ShardedOptimizer(model.parameters(), AdamW, lr=1e-3)
     else:
         optim = AdamW(model.parameters(), lr=1e-3)
+
     loss_fn = cross_entropy
 
     if not overlap:
@@ -110,6 +119,9 @@ def run(
 
     times_total = []
     times_comm = []
+
+    mems_before_step = []
+    mems_after_step = []
 
     device_type = "cuda" if device.startswith("cuda") else "cpu"
 
@@ -163,7 +175,15 @@ def run(
         if overlap:
             model.finish_gradient_synchronization()
 
+        # Measure peak memory just before optimizer step (captures peak memory during fwd, bwd, and grad sync)
+        mem_b_step = torch.cuda.max_memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+
         optim.step()
+
+        # Measure peak memory just after optimizer step (captures peak memory during the optimizer step itself)
+        mem_a_step = torch.cuda.max_memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
 
         _sync()
         tt1 = timeit.default_timer()
@@ -171,25 +191,49 @@ def run(
         if i >= warmup:
             times_total.append(tt1 - tt0)
             times_comm.append(tc1 - tc0)
+            mems_before_step.append(mem_b_step)
+            mems_after_step.append(mem_a_step)
 
-    # Gather timings
+    # Gather timings and memory stats
     gathered_totals: list[list[float]] | None = [None] * world_size if rank == 0 else None
     gathered_comms: list[list[float]] | None = [None] * world_size if rank == 0 else None
     dist.gather_object(times_total, gathered_totals, dst=0)
     dist.gather_object(times_comm, gathered_comms, dst=0)
 
+    # Gather single init memory value by putting it in a list
+    gathered_mem_after_init: list[list[float]] | None = [None] * world_size if rank == 0 else None
+    dist.gather_object([mem_after_init], gathered_mem_after_init, dst=0)  # Note: [mem_after_init]
+
+    # Gather lists of step memory values
+    gathered_mems_before_step: list[list[float]] | None = [None] * world_size if rank == 0 else None
+    gathered_mems_after_step: list[list[float]] | None = [None] * world_size if rank == 0 else None
+    dist.gather_object(mems_before_step, gathered_mems_before_step, dst=0)
+    dist.gather_object(mems_after_step, gathered_mems_after_step, dst=0)
+
     # On rank 0, print results
     if rank == 0:
-        # Flatten lists and convert to numpy arrays
         all_totals = np.array(list(itertools.chain.from_iterable(gathered_totals)))
         all_comms = np.array(list(itertools.chain.from_iterable(gathered_comms)))
 
-        # Calculate statistics (convert to ms)
         total_mean_ms = np.mean(all_totals) * 1000
         total_std_ms = np.std(all_totals) * 1000
         comm_mean_ms = np.mean(all_comms) * 1000
         comm_std_ms = np.std(all_comms) * 1000
         comm_proportion = comm_mean_ms / total_mean_ms if total_mean_ms > 0 else 0
+
+        # Convert bytes to MB
+        bytes_to_mb = 1 / (1024 * 1024)
+        all_mem_after_init = np.array(gathered_mem_after_init).flatten() * bytes_to_mb
+        mem_after_init_mean_mb = np.mean(all_mem_after_init)
+        mem_after_init_std_mb = np.std(all_mem_after_init)
+
+        all_mems_before_step = np.array(list(itertools.chain.from_iterable(gathered_mems_before_step))) * bytes_to_mb
+        all_mems_after_step = np.array(list(itertools.chain.from_iterable(gathered_mems_after_step))) * bytes_to_mb
+
+        mems_before_step_mean_mb = np.mean(all_mems_before_step)
+        mems_before_step_std_mb = np.std(all_mems_before_step)
+        mems_after_step_mean_mb = np.mean(all_mems_after_step)
+        mems_after_step_std_mb = np.std(all_mems_after_step)
 
         print(
             f"--- Results for Batch Size: {batch_size}, Seq Len: {seq_len}, Backend: {backend}, Warmup: {warmup}, Steps: {steps} ---"
@@ -203,7 +247,20 @@ def run(
         if not overlap:
             print(f"Avg comm time / step  : {comm_mean_ms:.2f} ± {comm_std_ms:.2f} ms")
             print(f"Comm proportion       : {comm_proportion:.2%}")
-        print("-" * 50)
+
+        if report_memory:
+            print("-" * 20 + " Memory Stats (MB) " + "-" * 20)
+            print(
+                f"Avg peak mem (across ranks) after init  : {mem_after_init_mean_mb:.2f} ± {mem_after_init_std_mb:.2f} MB"
+            )
+            print(
+                f"Avg peak mem (across ranks) before step : {mems_before_step_mean_mb:.2f} ± {mems_before_step_std_mb:.2f} MB"
+            )
+            print(
+                f"Avg peak mem (across ranks) after step  : {mems_after_step_mean_mb:.2f} ± {mems_after_step_std_mb:.2f} MB"
+            )
+
+            print("-" * 50)
 
     cleanup_ddp()
 
@@ -224,6 +281,7 @@ def _parse_args():
     parser.add_argument("--overlap-bucketed", action="store_true")
     parser.add_argument("--bucket-sizes-mb", type=float, nargs="+", default=[100])
     parser.add_argument("--shard-optimizer", action="store_true")
+    parser.add_argument("--report-memory", action="store_true")
     return parser.parse_args()
 
 
@@ -257,6 +315,7 @@ if __name__ == "__main__":
                     args.overlap_bucketed,
                     bucket_size_mb,
                     args.shard_optimizer,
+                    args.report_memory,
                 ),
                 nprocs=WORLD_SIZE,
                 join=True,

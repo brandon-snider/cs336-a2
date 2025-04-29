@@ -800,7 +800,27 @@ See `cs336_systems/optimizer_state_sharding.py`
 
 == Problem (`optimizer_state_sharding_accounting`): 5 points
 
-+ \@TODO — profile memory usage with and without sharding, report it, and break down how memory is divided between different model and optimizer components
++ *Avg. peak memory usage per device* (MB) for the XL model on 2 GPUs with a batch size of 16 and sequence length of 128:
+
+  #figure(
+    tablem[
+      | *Optimizer* | *After Init* | *Before Step* | *After Step* |
+      |-------------|--------------|---------------|--------------|
+      | Sharded     | 7804.65      | 26312.84      | 23723.84     |
+      | Unsharded   | 7804.65      | 34104.87      | 31564.80     |
+    ],
+    caption: "Optimizer State Sharding Memory Usage (XL, 2 GPUs, B=16, Seq Len=128)"
+  )
+
+  The results line up with expectations.
+  
+  This is a \~1.998B parameter model, so the model weights alone require \~7.62GB of memory. In all cases, the memory usage after model initialization lines up closely with the expected memory usage for the model weights.
+
+  The gradients then also require \~7.62GB of memory, and the optimizer states require \~15.24GB of memory in total. The total static memory requirement is then roughly $7.62 + 7.62 + 15.24 = 30.48$ GB. This aligns closely with the "after step" memory usage recorded in the unsharded case.
+  
+  In the sharded case, we'd expect half of the optimizer states to be stored on each device (on average), so the memory per device is roughly $7.62 + 7.62 + (15.24 / 2) = 22.86$ GB. This aligns closely with the "after step" memory usage recorded in the sharded case.
+
+  As expected, the difference in peak memory usage from "before step" to "after step" (\~2.6GB) does not depend on the optimizer state sharding scheme, because we don't handle activations any differently in the sharded case from the unsharded case.
 
 + *Mean total time per training step* for the XL model on 2 GPUs, using naive DDP (one all-reduce per parameter tensor) and a sequence length of 128:
 
@@ -816,4 +836,6 @@ See `cs336_systems/optimizer_state_sharding.py`
 
   Optimizer state sharding provides a modest speedup over the unsharded implementation with this setup. As expected, the gain from sharding is more pronounced with smaller batch sizes, where the optimizer step represents a larger fraction of total training time. This gain comes from the reduction in both HBM traffic and the number of elementwise operations in the optimizer step, since the optimizer on each rank is only responsible for tracking states and performing updates for its local subset of parameters.
 
-+ \@TODO — explain how out implementation differs from ZeRO-1, especially i.t.o memory and communication volume
++ Our sharded optimizer keeps the same per-rank memory profile as ZeRO stage 1 (only the FP32 Adam moments are partitioned, while parameters and gradients are fully replicated), but it differs in _how_ the updated weights are exchanged.
+
+  We broadcast each tensor individually from its "owner" rank after the local `step`, creating many small messages. ZeRO-DP $P_"os"$ performs a single fused all-gather of the whole parameter shard, so the total bytes moved per iteration is still $2 Psi$, but ZeRO incurs far fewer communication calls, and therefore lower latency at scale.
