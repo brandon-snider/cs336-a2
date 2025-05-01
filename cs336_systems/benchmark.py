@@ -2,32 +2,17 @@
 """
 `timeit`-based benchmarking.
 
-Usage:
+Example usage:
 - Forward only (inference mode):
-    python -m cs336_systems.benchmark --size sm --no-backward
-- Forward + backward (training mode):
-    python -m cs336_systems.benchmark --size sm
-
-Flags:
-  --size: sm, md, lg, xl, 2.7b
-  --d_model: int
-  --d_ff: int
-  --num_layers: int
-  --num_heads: int
-  --batch_size: int
-  --seq_len: int
-  --vocab_size: int
-  --warmup: int
-  --steps: int
-  --mixed: bool
-  --compile: bool
-  --mode: forward, forward_backward, train
-  --memory: bool
+    python -m cs336_systems.benchmark --size sm --mode forward
+- Forward + backward:
+    python -m cs336_systems.benchmark --size sm --mode forward_backward
+- Forward + backward + optimizer step (i.e. full training step):
+    python -m cs336_systems.benchmark --size sm --mode train
 """
 
 import argparse
 from contextlib import nullcontext
-import sys
 import timeit
 import torch
 import os
@@ -52,12 +37,13 @@ _MODE_NAME_MAP = {
 
 
 def _parse_args() -> argparse.Namespace:
-    """Build an ``argparse`` interface and return parsed arguments."""
     p = argparse.ArgumentParser()
 
     size_grp = p.add_mutually_exclusive_group(required=True)
     size_grp.add_argument("--size", choices=_PRESETS.keys())
     size_grp.add_argument("--d_model", type=int)
+
+    p.add_argument("--mode", choices=["forward", "forward_backward", "train"], default="forward")
 
     p.add_argument("--d_ff", type=int)
     p.add_argument("--num-layers", dest="num_layers", type=int)
@@ -72,9 +58,6 @@ def _parse_args() -> argparse.Namespace:
 
     p.add_argument("--mixed", action="store_true")
     p.add_argument("--compile", dest="compile_model", action="store_true")
-
-    p.add_argument("--mode", choices=["forward", "forward_backward", "train"], default="forward")
-
     p.add_argument("--memory", dest="profile_memory", action="store_true")
 
     return p.parse_args()
@@ -94,40 +77,22 @@ def run_benchmark(
     size_name: str | None = None,
     device: str = "cuda",
 ) -> dict[str, float]:
-    """
-    Runs the benchmark with the given configuration.
-
-    Args:
-        model_config: Dictionary containing model hyperparameters (d_model, d_ff, etc.).
-        batch_size: Batch size for inputs.
-        seq_len: Sequence length for inputs.
-        vocab_size: Vocabulary size.
-        warmup: Number of warmup steps.
-        steps: Number of measured steps.
-        mixed: Whether to use mixed precision (bfloat16).
-        compile_model: Whether to compile the model with torch.compile.
-        mode: Execution mode ('forward', 'forward_backward', 'train').
-        profile_memory: Whether to profile memory usage and save snapshot.
-        size_name: Name of the model size preset (e.g., 'sm') if used, for filename.
-        device: The device to run on (e.g., 'cuda').
+    """Runs the benchmark with the given configuration.
 
     Returns:
         A dictionary containing timing statistics (mean, std, percentage) for
-        forward, backward (if applicable), optimizer (if applicable), and total steps.
+        forward, backward (if applicable), optimizer (if applicable), and total
+        (forward [+ backward] [+ optimizer]).
     """
     if not torch.cuda.is_available() and device == "cuda":
         raise RuntimeError("CUDA is not available, but device='cuda' was requested.")
 
-    # Ensure model_config uses 'num_layers' key if it exists
     if "d_layers" in model_config:
         model_config["num_layers"] = model_config.pop("d_layers")
 
-    model: torch.nn.Module = Transformer(
-        vocab_size=vocab_size,
-        context_length=seq_len,
-        **model_config,
-        rope_theta=10000.0,
-    ).to(device=device)
+    model: torch.nn.Module = Transformer(vocab_size=vocab_size, context_length=seq_len, **model_config).to(
+        device=device
+    )
 
     if compile_model:
         model = torch.compile(model)
@@ -138,11 +103,11 @@ def run_benchmark(
     inputs = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
     targets = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
 
-    f_ctx = torch.autocast(device_type=device, dtype=torch.bfloat16) if mixed else nullcontext()
+    mixed_or_null_ctx = torch.autocast(device_type=device, dtype=torch.bfloat16) if mixed else nullcontext()
 
     fw_samples, bw_samples, opt_samples = [], [], []
 
-    with f_ctx:
+    with mixed_or_null_ctx:
         for i in range(warmup + steps):
             if i == warmup and profile_memory:
                 torch.cuda.memory._record_memory_history(max_entries=1000000)
@@ -163,12 +128,11 @@ def run_benchmark(
 
             dt_opt = 0.0
             if mode == "train":
-                torch.cuda.synchronize(device=device)
                 t2 = timeit.default_timer()
                 optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
                 torch.cuda.synchronize(device=device)
                 dt_opt = timeit.default_timer() - t2
+                optimizer.zero_grad(set_to_none=True)
             else:
                 model.zero_grad(set_to_none=True)
 
@@ -217,8 +181,7 @@ def run_benchmark(
 
 def main() -> None:
     if not torch.cuda.is_available():
-        print("Error: CUDA is not available. This benchmark requires a CUDA-capable GPU.", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError("CUDA is not available")
 
     args = _parse_args()
     size_name = args.size
@@ -228,11 +191,8 @@ def main() -> None:
     else:
         required = ("d_model", "d_ff", "num_layers", "num_heads")
         if any(getattr(args, k) is None for k in required):
-            print(
-                "Error: Must supply all of --d_model, --d_ff, --num-layers, --num-heads when --size is omitted.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            raise ValueError("Must supply all of --d_model, --d_ff, --num-layers, --num-heads when --size is omitted.")
+
         cfg = dict(d_model=args.d_model, d_ff=args.d_ff, num_layers=args.num_layers, num_heads=args.num_heads)
 
     results = run_benchmark(

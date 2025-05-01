@@ -1,8 +1,9 @@
 #!/usr/bin/env python
+
 """
 NVTX-based profiling harness for nsys.
 
-Usage:
+Example usage:
 - Forward only:
     uv run nsys profile -o out/profiling/forward-sm-128 python -m cs336_systems.profile --size sm --seq-len 128 --mode forward
 - Forward + backward:

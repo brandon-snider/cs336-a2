@@ -30,8 +30,11 @@ class DDPBucketedParameters(nn.Module):
         super().__init__()
         self.module = module
         self.bucket_size_mb = bucket_size_mb
-        # Parameters per bucket (typically stored in float32 — i.e. 4 bytes/param)
-        self.bucket_size_params = int(bucket_size_mb * 1024**2 / 4)
+
+        # Determine parameters per bucket based on the data type used for the parameters
+        param_dtype = next(module.parameters()).dtype
+        bytes_per_param = param_dtype.itemsize
+        self.bucket_size_params = int(bucket_size_mb * 1024**2 / bytes_per_param)
 
         # Buckets of parameters, each of which will be all-reduced together
         self.buckets: list[Bucket] = []
@@ -68,8 +71,6 @@ class DDPBucketedParameters(nn.Module):
 
         if this_bucket.num_params > 0:
             self.buckets.append(this_bucket)
-
-        print(f"\nUsing {len(self.buckets)} buckets")
 
     def _register_hooks(self):
         """Register post-accumulate gradient hook for each parameter"""

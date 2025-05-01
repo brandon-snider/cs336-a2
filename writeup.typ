@@ -42,7 +42,7 @@
 
 + See `cs336_systems/benchmark.py` and `cs336_systems/benchmark.sh`
 
-+ Benchmarking results (CUDA, *5 warmup steps*, 10 steps, varying sequence length):
++ Benchmarking results (CUDA, *5 warmup steps*, 10 timed steps, varying sequence length):
   
   #figure(tablem[
   | *Model*   | *Forward ($mu plus.minus sigma$)* | *Backward ($mu plus.minus sigma$)* | *Total ($mu plus.minus sigma$)* |
@@ -94,7 +94,7 @@
 
   There is little variation across measurements, as seen by the small standard deviations (generally well under 1 ms).
 
-+ Benchmarking results (CUDA, *0 warmup steps*, 10 steps, varying sequence length):
++ Benchmarking results (CUDA, *0 warmup steps*, 10 timed steps, varying sequence length):
 
   #figure(tablem[
   | *Model* | *Forward ($mu plus.minus sigma$)* | *Backward ($mu plus.minus sigma$)* | *Total ($mu plus.minus sigma$)* |
@@ -144,9 +144,9 @@
   caption: "CUDA Benchmarking Results (no warmup, sequence length = 1024)"
   )
 
-  Without warmup, the standard deviations are much larger, likely because the initial steps incur one-time overheads such as CUDA kernel loading and memory allocation for tensors like activations and gradients. Once these setup costs are paid and the stead-state throughput is reached, subsequent steps exhibit much less variability.
+  Without warmup, the standard deviations are much larger. The initial steps incur one-time overheads such as kernel loading and memory allocation for tensors like the parameters and gradients. Once these setup costs are paid and the stead-state throughput is reached, subsequent steps exhibit much less variability.
 
-  Benchmarking results (CUDA, *1 warmup step*, 10 steps, varying sequence length):
+  Benchmarking results (CUDA, *1 warmup step*, 10 timed steps, varying sequence length):
 
   #figure(tablem[
   | *Model* | *Forward ($mu plus.minus sigma$)* | *Backward ($mu plus.minus sigma$)* | *Total ($mu plus.minus sigma$)* |
@@ -196,7 +196,7 @@
   caption: "CUDA Benchmarking Results (1 warmup step, sequence length = 1024)"
   )
 
-  Even with a single warmup step, the variance is noticeably higher than with five warmup steps. This suggests that one iteration may not be sufficient to complete all initialization processes, such as loading all necessary CUDA kernels or stabilizing memory allocation patterns. Subsequent steps might still encounter some initial overheads until a true steady state is reached, which appears to take a few iterations.
+  Even with a single warmup step, the variance is noticeably higher than with five warmup steps. This suggests that one iteration may not be sufficient to complete all initialization processes, such as loading all necessary GPU kernels or stabilizing memory allocation patterns. Subsequent steps might still encounter some initial overheads until a true steady state is reached, which appears to take a few iterations.
   
 == Problem  (`nsys_profile`): 5 points
 
@@ -258,15 +258,15 @@
     (int, T3)`
 
 
-+ With forward‑pass inference only, the four cublas GEMM kernels (all the `sm90_xmma_gemm_*` kernels) add up to \~36 % of the work.
++ With forward‑pass inference only, the four GEMM kernels (all the `sm90_xmma_gemm_*` kernels) add up to \~36 % of the work.
 
-  During a full training step (forward + backward + AdamW update), those kernels take roughly the same amount of time, but the overall kernel increases significantly because of the many vectorised element‑wise AdamW and reduction kernels (the "vectorized_elementwise_kernel" calls and "reduce_kernel" calls). Consequently, GEMMs now represent only \~19 % of the total. In other words, matrix multiplication's share of runtime is roughly halved, while inexpensive but numerous element‑wise update kernels (mul/add/div/sqrt/fill) and a few extra reductions become the dominant cost.
+  During a full training step (forward + backward + AdamW update), those kernels take roughly the same amount of time, but the overall kernel time increases significantly because of the many vectorised element‑wise AdamW and reduction kernels (the "vectorized_elementwise_kernel" calls and "reduce_kernel" calls). Consequently, GEMMs now represent only \~19 % of the total. In other words, matrix multiplication's share of runtime is roughly halved, while the element‑wise update kernels (mul/add/div/sqrt/fill) and a few extra reductions become the dominant cost.
 
 + In many cases, the softmax operation takes as long as computing the attention scores and taking the inner products with the value vectors combined (the softmax:matmul ratio within the attention operation varies from \~0.6x to \~1.2x in my experiments).
 
   This is despite a vastly lower FLOP count (on the order of a 10x difference) for the softmax operation, compared to the matmuls.
 
-  This suggests that the softmax operation consumes significantly more wall time per FLOP, yielding poor utilization due to its memory-bound, control-flow-heavy nature.
+  The softmax operation consumes significantly more wall time per FLOP, yielding poor utilization due to its memory-bound, control-flow-heavy nature.
 
 == Problem (`mixed_precision_accumulation`): 1 point
 
@@ -274,11 +274,11 @@ We get the most accurate result (10.0001) with both the accumulator and the summ
 
 == Problem (`benchmarking_mixed_precision`): 2 points
 
-+ Model parameters: `float32`
-  Output of `fc1`: `float16`
-  Output of `ln`: `float32`
-  Predicted logits: `float16`
-  Loss: `float32`
++ Model parameters: `float32`\
+  Output of `fc1`: `float16`\
+  Output of `ln`: `float32`\
+  Predicted logits: `float16`\
+  Loss: `float32`\
   Gradients: `float32`
 
 + The sensitive parts are the mean and variance reductions to compute the layer normalization statistics, and the reciprocal square root computation. The sensitivity is due to the possibility of overflow when the intermediate values are held in the $plus.minus$ 65k range of FP16. BF16 matches the dynamic range of FP32. That removes the overflow risk, and makes it possible to run LayerNorm in BF16.
@@ -286,7 +286,7 @@ We get the most accurate result (10.0001) with both the accumulator and the summ
 + Forward pass timings (sequence length = 512):
 
   #figure(tablem[
-  | *Model*   | *BF16 (ms)* | *FP32 (ms)* |
+  | *Model*   | *Mixed (BF16) (ms)* | *FP32 (ms)* |
   |-----------|-------------|-------------|
   | small     | 22.008      | 20.015      |
   | medium    | 43.673      | 56.011      |
@@ -300,7 +300,7 @@ We get the most accurate result (10.0001) with both the accumulator and the summ
   Backward pass timings (sequence length = 512):
 
   #figure(tablem[
-  | *Model*   | *BF16 (ms)* | *FP32 (ms)* |
+  | *Model*   | *Mixed (BF16) (ms)* | *FP32 (ms)* |
   |-----------|-------------|-------------|
   | small     | 27.576      | 41.988      |
   | medium    | 54.394      | 114.903     |
@@ -321,7 +321,7 @@ We get the most accurate result (10.0001) with both the accumulator and the summ
 
   #figure(image("images/mem_2.7b_fbs_512.png"), caption: "Memory Profile (FP32, 2.7B, full train step, 512 sequence length)")
 
-  In both memory timelines, active memory rises from the  to a peak of about 70GB during the forward pass, when memory is being allocated for the activations. In the forward-only run, the timeline is almost a perfect triangle, as memory declines sharply back to the weight-only baseline at the end of the forwrd pass. In the full training step, the descent is shallower — during the backward pass, each activations are iteratively freed after gradients have been materialised (for which memory is allocated), so memory hovers in the mid-50GB range. It plateaus there while the optimizer updates the parameters, and finally drops to the a steady state that is larger than the initial baseline due to the optimizer state. The peak identifies the end of the forward pass, the long sloping shoulder is the backward pass, and the flat tail is the optimizer step.
+  In both memory timelines, active memory rises to a peak of about 70GB during the forward pass, when memory is being allocated for the activations. In the forward-only run, the timeline is almost a perfect triangle, as memory declines sharply back to the weight-only baseline at the end of the forwrd pass. In the full training step, the descent is shallower — during the backward pass, activations are iteratively freed after gradients have been materialised (for which memory is allocated), so memory hovers in the mid-50GB range. It plateaus there while the optimizer updates the parameters, and finally drops to a steady state that is larger than the initial baseline due to the optimizer state. The peak identifies the end of the forward pass, the long sloping shoulder is the backward pass, and the flat tail is the optimizer step.
 
 + Peak memory usage by sequence length for 2.7b model:
 
@@ -458,6 +458,8 @@ We get the most accurate result (10.0001) with both the accumulator and the summ
   ],
   caption: "Full Model Timings (Medium, B=4, L=1024) with/without JIT Compilation"
   )
+
+  We see significant improvements in latency for both the forward and backward passes, and no significant change in the optimizer step. In total, JIT compilation shaves \~25% off the total training step time with this configuration.
 
 == Problem (`flash_forward`): 15 points
 
@@ -654,7 +656,7 @@ As expected, the single batched all-reduce call is faster than individually comm
 
 == Problem (`ddp_overlap_individual_parameters`): 5 points
 
-See `cs336_systems/ddp_overlap.py`
+See `cs336_systems/ddp_overlap_individual.py`
 
 == Problem (`ddp_overlap_individual_parameters_benchmarking`): 1 point
 
@@ -819,7 +821,7 @@ See `cs336_systems/ddp_overlap_bucketed.py`
     caption: "Compute-Bound Calculation Inputs (TPU v5p)"
   )
 
-  According to the section on mixed FDSP + TP from the TPU Scaling Book, the compute-bound inequality for mixed FSDP + TP is $ B / N > (4 alpha^2) / (M_X M_Y F) $.
+  According to the section on mixed FDSP + TP from the TPU Scaling Book #cite(<scaling-book>), the compute-bound inequality for mixed FSDP + TP is $ B / N > (4 alpha^2) / (M_X M_Y F) $.
 
   Computing the right-hand side:
   $ (4 alpha^2) / (M_X M_Y F) = (4 (2.555 times 10^3)^2) / (2 times 1 times 53248) approx 2.46 times 10^2 " tokens" $

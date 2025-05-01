@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """Minimal benchmark for `scaled_dot_product_attention`"""
 
 import timeit

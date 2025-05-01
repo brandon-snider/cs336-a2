@@ -46,7 +46,6 @@ def run(rank: int, world_size: int, steps: int = 20, batch_size: int = 32, backe
 
     device = setup_ddp(rank, world_size, backend)
     dist.barrier()
-    # torch.manual_seed(rank)
 
     assert batch_size % world_size == 0, "Batch size must be divisible by world size"
     local_batch_size = batch_size // world_size
@@ -74,9 +73,6 @@ def run(rank: int, world_size: int, steps: int = 20, batch_size: int = 32, backe
         torch.manual_seed(data_seed)
         all_x = torch.randn(batch_size, 32, device=device)
         all_y = torch.randint(0, 10, (batch_size,), device=device)
-
-        # Restore rank-specific seed if other random operations depended on it
-        # torch.manual_seed(rank * steps + step)
 
         # DDP Training Step with partition for the current rank
         start_idx = rank * local_batch_size
@@ -133,9 +129,10 @@ def _parse_args():
 if __name__ == "__main__":
     args = _parse_args()
     WORLD_SIZE = args.world_size
-    # Ensure batch size is divisible by world size before spawning processes
+
     assert args.batch_size % WORLD_SIZE == 0, (
         f"Batch size ({args.batch_size}) must be divisible by world size ({WORLD_SIZE})"
     )
+
     BACKEND = args.backend or "nccl" if torch.cuda.is_available() else "gloo"
     mp.spawn(run, args=(WORLD_SIZE, args.steps, args.batch_size, BACKEND), nprocs=WORLD_SIZE, join=True)
