@@ -99,8 +99,6 @@ def main() -> None:
             raise ValueError("Must supply all custom h‑params when --size is omitted")
         cfg = dict(d_model=args.d_model, d_ff=args.d_ff, d_layers=args.d_layers, num_heads=args.num_heads)
 
-    # torch.set_float32_matmul_precision("high")
-
     if args.annotate_sdpa:
         _m.scaled_dot_product_attention = _sdpa_annotated
 
@@ -127,9 +125,9 @@ def main() -> None:
     if args.mixed:
         print("Using mixed precision")
 
-    f_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if args.mixed else nullcontext()
+    mixed_or_null_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if args.mixed else nullcontext()
 
-    with f_ctx:
+    with mixed_or_null_ctx:
         for _ in range(args.warmup + args.steps):
             mode_str = "warmup." if _ < args.warmup else "profiling."
 
