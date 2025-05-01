@@ -677,7 +677,23 @@ See `cs336_systems/ddp_overlap_individual.py`
 
   The naive implementation used 42.76ms for communication, on average. We can then estimate that the time per training step not if communication overhead could be completely eliminated would be $531.74 - 42.76 approx 489 "ms"$. The overlap-individual implementation used 509.30ms per training step, suggesting $approx 20 "ms"$ of communication overhead — an improvement of \~53% over naive DDP, and of \~44% over flat DDP.
 
-+ \@TODO use Nsight to compare traces visually, include screenshots showing that one overlaps communication with computation and the other does not
++ Trace of naive DDP (no overlapping):
+
+  #figure(
+    image("images/ddp_naive.png"),
+    caption: "Naive DDP trace"
+  )
+
+  Trace of "overlap-individual" DDP:
+
+  #figure(
+    image("images/ddp_overlap.png"),
+    caption: "Overlap-individual DDP trace"
+  )
+
+  In the first trace (naive DDP), we see all NCCL launches coming from the main Python thread (where we iterate over parameters and call `dist.all_reduce` on each, after `loss.backward()`). We also see clusters of NCCL tiles separated by long gaps (while the main thread is blocked in `pthread_cond_wait` during backward).
+
+  In the second trace (overlap-individual DDP), we see the NCCL row under a thread starting with `pt_autograd_`, which belongs to Python's internal autograd engine and is active only while the backward graph is still being executed. We also see a more spread out distribution of NCCL tiles, as communication is overlapped with computation during the backward pass.
 
 == Problem (`ddp_overlap_bucketed`): 8 points
 
